@@ -225,13 +225,8 @@ def run_cycle(client, config, state, runtime, dry_run=False):
         delay = min(3600, 300 * 2**min(state['failures']-1,4))
         delay = max(delay, max(e.retry_after for e in errors))
         LOG.warning('query failed: %s; next check in %ss',errors[0].code,delay)
-        if not dry_run and now-state.get('last_error_notice',0) >= 21600:
-            telegram('⚠️ iPhone Duo 监控查询受阻：'+errors[0].code+'。尚不能确认库存；已自动降频重试，不代表无货。只在确认 NJ/NY 门店当天至未来 3 天可取货后发库存提醒。')
-            state['last_error_notice'] = now
     else:
         delay = config['interval_seconds']
-        if state.get('failures',0) and not dry_run:
-            telegram('✅ iPhone Duo 库存查询已恢复。NJ/NY 监控正常，每分钟检查；仅提醒未来 3 天内可取货的 Duo。')
         state['failures'] = 0
         state['last_success_at'] = now
         LOG.info('cycle healthy; %s eligible offers',len(pending))
@@ -296,9 +291,10 @@ def main():
     while True:
         try:
             delay = run_cycle(client,config,state,runtime,args.dry_run)
-        except QueryError as exc:
-            LOG.error('cycle or notification failure: %s',exc.code)
-            state['status']='degraded'; state['last_error']=exc.code
+        except Exception as exc:
+            error = exc.code if isinstance(exc,QueryError) else type(exc).__name__
+            LOG.error('cycle or notification failure: %s',error)
+            state['status']='degraded'; state['last_error']=error
             delay=300
             state['next_check_at']=time.time()+delay
             atomic_json(state_path,state)

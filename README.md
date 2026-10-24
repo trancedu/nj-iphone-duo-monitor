@@ -7,7 +7,7 @@ Python 3.9+ standard-library monitor for Apple US store pickup. No packages or p
 - One scan starts approximately every 60–70 seconds; two sequential SKU requests, five seconds apart. No parallel workers or overlapping scans.
 - HTTP errors back off 5, 10, 20, 40, then 60 minutes; honor longer Retry-After. No proxy rotation, CAPTCHA handling, or immediate retry loops.
 - Same store/SKU/date notification suppressed for 30 minutes, including across restarts. Failed sends are retried on a later scan.
-- Telegram health warnings at most once per six hours; recovery notice after successful scans resume.
+- An independent launchd watchdog checks health every minute. Process exits/hangs must persist for two minutes; failed queries/notifications for five minutes. It sends one alert per outage and one recovery notice after two healthy checks. New outage alerts are limited to one per hour; failed Telegram attempts retry at most every five minutes. State survives restarts.
 
 ## Verified on 2026-10-24
 
@@ -61,3 +61,14 @@ launchctl kickstart -k gui/$(id -u)/com.trancedu.iphone-duo-monitor
 ```
 
 Runtime responses/state/logs are ignored by Git. The application log rotates at 2 MB with three backups.
+
+## Independent health watchdog
+
+`watchdog.py` runs separately and does not import monitor.py, so a syntax error or crash in the stock monitor does not disable health checks. `deploy/install.sh` installs both LaunchAgents. The monitor still restarts automatically via launchd. A completed watchdog run normally appears as not running between minute ticks; inspect `runtime/watchdog-state.json` for its last check.
+
+```sh
+cat runtime/watchdog-state.json
+launchctl print gui/$(id -u)/com.trancedu.iphone-duo-watchdog
+```
+
+The watchdog respects a future retry deadline when detecting hangs. It owns health notifications; the stock monitor sends inventory alerts only. A computer shutdown, sleep, or loss of network prevents immediate Telegram delivery; local monitoring resumes when the computer is awake and connected.
