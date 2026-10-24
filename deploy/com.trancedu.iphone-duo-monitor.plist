@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.trancedu.iphone-duo-monitor</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/homebrew/opt/python@3.13/bin/python3.13</string>
+		<string>/Users/codex/workspace/nj-iphone-duo-monitor/monitor.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Users/codex/workspace/nj-iphone-duo-monitor/runtime/service.stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>/Users/codex/workspace/nj-iphone-duo-monitor/runtime/service.stdout.log</string>
+	<key>ThrottleInterval</key>
+	<integer>60</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/codex/workspace/nj-iphone-duo-monitor</string>
+</dict>
+</plist>
