@@ -2,9 +2,9 @@
 
 Python 3.9+ standard-library monitor for Apple US store pickup. No packages or paid services required.
 
-- Production alerts: iPhone Duo only, both colors, 256GB/512GB/1TB/2TB, connect to a carrier later.
+- Production alerts: iPhone Duo only, both colors, 256GB only, connect to a carrier later.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.
-- One scan starts approximately every 60–70 seconds; eight sequential SKU requests, five seconds apart. No parallel workers or overlapping scans.
+- One scan starts approximately every 60–70 seconds; two sequential SKU requests, five seconds apart. No parallel workers or overlapping scans.
 - HTTP errors back off 5, 10, 20, 40, then 60 minutes; honor longer Retry-After. No proxy rotation, CAPTCHA handling, or immediate retry loops.
 - Same store/SKU/date notification suppressed for 30 minutes, including across restarts. Failed sends are retried on a later scan.
 - Telegram health warnings at most once per six hours; recovery notice after successful scans resume.
@@ -33,7 +33,7 @@ Credentials: export `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, or pass `--env-
 
 `--smoke-test` checks one Pro Max and one Duo against both states, saves diagnostic JSON, never sends inventory alerts, and exits nonzero on failed regional queries. `--once` exits nonzero on failed inventory/notification processing. `--dry-run` never sends Telegram messages. Do not run diagnostic commands in tight loops.
 
-`catalog.json` and `config.json` contain the eight Duo SKUs and product links verified against Apple's current product page. `--discover` refreshes catalog.json; update config.json deliberately after reviewing changes.
+`catalog.json` and `config.json` contain the discovered Duo SKUs and product links verified against Apple's current product page. Production config.json watches only the two 256GB variants. `--discover` refreshes catalog.json; update config.json deliberately after reviewing changes.
 
 ## Mac deployment
 
