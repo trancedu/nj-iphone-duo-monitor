@@ -4,7 +4,7 @@ Python 3.9+ standard-library monitor for Apple US store pickup. No packages or p
 
 - Production alerts: iPhone Duo only, connect to a carrier later. Each cycle queries 256GB Star White first, then one randomly selected variant from the other seven color/capacity combinations.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.
-- One scan starts approximately every 60–70 seconds; two sequential SKU requests, five seconds apart. No parallel workers or overlapping scans.
+- Regular scans start approximately every 60–70 seconds. Every day from 07:55 inclusive to 08:15 exclusive in America/New_York, scans start approximately every 20–22 seconds. Two sequential SKU requests, five seconds apart, remain the maximum per cycle. Failures always use the longer backoff, including during the morning window. No parallel workers or overlapping scans.
 - HTTP errors back off 5, 10, 20, 40, then 60 minutes; honor longer Retry-After. No proxy rotation, CAPTCHA handling, or immediate retry loops.
 - Same store/SKU/date notification suppressed for 30 minutes, including across restarts. Failed sends are retried on a later scan.
 - An independent launchd watchdog checks health every minute. Process exits/hangs must persist for two minutes; failed queries/notifications for five minutes. It sends one alert per outage and one recovery notice after two healthy checks. New outage alerts are limited to one per hour; failed Telegram attempts retry at most every five minutes. State survives restarts.
@@ -72,3 +72,11 @@ launchctl print gui/$(id -u)/com.trancedu.iphone-duo-watchdog
 ```
 
 The watchdog respects a future retry deadline when detecting hangs. It owns health notifications; the stock monitor sends inventory alerts only. A computer shutdown, sleep, or loss of network prevents immediate Telegram delivery; local monitoring resumes when the computer is awake and connected.
+
+## Faster morning alerts and browser shortcut
+
+`morning_peak` config enables the 07:55–08:15 local-time window at 20 seconds per cycle. This is roughly six inventory requests per minute during that window. This schedule is an experiment based on one observed 08:14 restock, not a guarantee of a daily release time.
+
+Stock alerts are sent immediately after the matching SKU query completes, before the second SKU request. Each alert includes the exact capacity/color, observation time, pickup date, store and product URL. Positive observations are also appended to `runtime/availability-events.jsonl` so future history does not rely only on overwritten snapshots.
+
+With `auto_open_product_page: true`, a newly sent stock alert also opens the exact product URL in the Mac's default browser, at most once per model per cycle. It does not select a pickup store or advance checkout. Use your regular browser with your Apple login and payment details ready; you complete checkout and confirm payment yourself. Browser-opening failures are logged separately and do not stop stock checks.

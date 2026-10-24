@@ -49,6 +49,30 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(state['selected_skus'],client.calls)
         self.assertEqual(set(state['coverage']),set(client.calls))
 
+    def test_morning_window_boundaries_and_timezone(self):
+        config={'interval_seconds':60,'morning_peak':{'start':'07:55','end':'08:15','interval_seconds':20}}
+        for hour,minute,expected in [(7,54,60),(7,55,20),(8,0,20),(8,14,20),(8,15,60)]:
+            at=dt.datetime(2026,10,25,hour,minute,tzinfo=m.TZ)
+            self.assertEqual(m.polling_interval(config,at),expected)
+        utc=dt.datetime(2026,10,25,12,0,tzinfo=dt.timezone.utc)
+        self.assertEqual(m.polling_interval(config,utc),20)
+
+    def test_alert_precedes_second_query_and_opens_once_per_model(self):
+        catalog=json.loads((m.ROOT/'catalog.json').read_text())
+        config={'products':catalog,'selection':{'fixed_sku':'MK1E4LL/A'},'stores':{'R001':{}},'max_pickup_days':3,'interval_seconds':60,'request_gap_seconds':5,'auto_open_product_page':True}
+        events=[]
+        class Fake:
+            def inventory(self,sku,stores):
+                events.append('query:'+sku)
+                p=payload(display='available' if sku=='MK1E4LL/A' else 'unavailable')
+                p['body']['content'][0]['pickupEncodedUpperDateString']=dt.datetime.now(m.TZ).strftime('%Y%m%d')
+                return p
+        state={}
+        with tempfile.TemporaryDirectory() as path, patch.object(m.random,'choice',return_value='MK1F4LL/A'), patch.object(m.time,'sleep'), patch.object(m,'telegram',side_effect=lambda message:events.append('alert')), patch.object(m,'open_product_page',side_effect=lambda url:events.append('open')):
+            m.run_cycle(Fake(),config,state,Path(path))
+            self.assertTrue((Path(path)/'availability-events.jsonl').exists())
+        self.assertEqual(events,['query:MK1E4LL/A','alert','open','query:MK1F4LL/A'])
+
     def test_dates(self):
         for quote, days in [('Available Today',0),('Available Tomorrow',1),('Oct 25',2),('October 26, 2026',3),('2026-10-24',1),('Oct 24–26',3)]:
             self.assertEqual(m.pickup_date(quote,TODAY),TODAY+dt.timedelta(days=days))

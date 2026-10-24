@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import random
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -182,6 +183,46 @@ def select_products(config):
     extra = random.choice(others)
     return {sku:products[sku] for sku in (fixed,extra)}
 
+def polling_interval(config, at=None):
+    at = at or dt.datetime.now(TZ)
+    peak = config.get('morning_peak',{})
+    local = at.astimezone(TZ)
+    minute = local.hour*60+local.minute
+    def minutes(value):
+        hour,minute = map(int,value.split(':'))
+        return hour*60+minute
+    if peak and minutes(peak['start']) <= minute < minutes(peak['end']):
+        return peak['interval_seconds']
+    return config['interval_seconds']
+
+def open_product_page(url):
+    if not url.startswith(BASE+'/shop/buy-iphone/iphone-duo/'):
+        LOG.warning('browser open refused unexpected product URL'); return
+    try:
+        result=subprocess.run(['/usr/bin/open',url],capture_output=True,timeout=10)
+        if result.returncode: LOG.warning('browser open failed: exit %s',result.returncode)
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        LOG.warning('browser open failed: %s',type(exc).__name__)
+
+def notify_offer(offer,config,state,runtime,dry_run,opened):
+    now=time.time()
+    # Keep a durable observation trail; raw per-SKU snapshots are overwritten later.
+    event={'observed_at':dt.datetime.now(TZ).isoformat(),**offer}
+    with (runtime/'availability-events.jsonl').open('a') as output:
+        output.write(json.dumps(event,ensure_ascii=False)+'\n')
+    if not should_alert(offer,state,now): return
+    message=('📱 iPhone Duo 可 Pickup\n'+offer['name']+'\n'+offer['state']+' · '+offer['store']+
+             '\n取货日期：'+offer['date']+'（美东）\n发现时间：'+dt.datetime.now(TZ).strftime('%H:%M:%S')+
+             '（美东）\n'+offer['quote']+'\n'+offer['url']+'\n请按此颜色、容量选择门店并确认库存。')
+    if dry_run: LOG.info('dry-run offer %s %s %s',offer['sku'],offer['store'],offer['date']); return
+    telegram(message)
+    state.setdefault('sent',{})[offer_key(offer)]=now
+    atomic_json(runtime/'state.json',state)
+    LOG.info('stock alert sent: %s %s %s',offer['sku'],offer['store_id'],offer['date'])
+    if config.get('auto_open_product_page') and offer['sku'] not in opened:
+        opened.add(offer['sku'])
+        open_product_page(offer['url'])
+
 def run_cycle(client, config, state, runtime, dry_run=False):
     now = time.time()
     today = dt.datetime.now(TZ).date()
@@ -191,6 +232,7 @@ def run_cycle(client, config, state, runtime, dry_run=False):
     all_offers = {}
     errors = []
     coverage = {}
+    opened = set()
     for index, (sku, product) in enumerate(products.items()):
         if index: time.sleep(config['request_gap_seconds'])
         try:
@@ -207,16 +249,11 @@ def run_cycle(client, config, state, runtime, dry_run=False):
         except QueryError as exc:
             errors.append(exc)
             break
+        # Notify immediately after each successful SKU query, before the next request.
+        for offer in offers:
+            notify_offer(offer,config,state,runtime,dry_run,opened)
     state['coverage'] = coverage
-    pending = sorted(all_offers.values(), key=lambda x:(x['date'], x['state'] != 'NJ', x['store']))
-    for offer in pending:
-        if should_alert(offer, state, now):
-            message = ('📱 iPhone Duo 可 Pickup\n'+offer['name']+'\n'+offer['state']+' · '+offer['store']+'\n取货日期：'+offer['date']+'（美东）\n'+offer['quote']+'\n'+offer['url']+'\n库存随时变化，请立即在官网确认并下单。')
-            if dry_run: LOG.info('dry-run offer %s %s %s', offer['sku'],offer['store'],offer['date'])
-            else:
-                telegram(message)
-                state.setdefault('sent', {})[offer_key(offer)] = now
-                atomic_json(runtime/'state.json', state)
+    pending = sorted(all_offers.values(),key=lambda x:(x['date'],x['state'] != 'NJ',x['store']))
     state['last_cycle_at'] = now
     state['eligible_offers'] = len(pending)
     state['status'] = 'degraded' if errors else 'healthy'
@@ -226,7 +263,7 @@ def run_cycle(client, config, state, runtime, dry_run=False):
         delay = max(delay, max(e.retry_after for e in errors))
         LOG.warning('query failed: %s; next check in %ss',errors[0].code,delay)
     else:
-        delay = config['interval_seconds']
+        delay = polling_interval(config)
         state['failures'] = 0
         state['last_success_at'] = now
         LOG.info('cycle healthy; %s eligible offers',len(pending))
@@ -258,7 +295,10 @@ def main():
         telegram('🧪 iPhone Duo 监控 Telegram 通道测试成功。这是测试消息，不是有货提醒。'); return 0
     config = json.loads(Path(args.config).read_text())
     if config['interval_seconds'] < 60 or config['request_gap_seconds'] < 3:
-        parser.error('minimum interval 60s, request gap 3s')
+        parser.error('minimum regular interval 60s, request gap 3s')
+    peak=config.get('morning_peak',{})
+    if peak and peak.get('interval_seconds',0) < 20:
+        parser.error('minimum peak interval 20s')
     if args.smoke_test:
         # Diagnostics never call Telegram and never enter production alert state.
         result = {}
@@ -299,7 +339,8 @@ def main():
             state['next_check_at']=time.time()+delay
             atomic_json(state_path,state)
         if args.once: return 0 if state.get('status') == 'healthy' else 1
-        time.sleep(delay+random.uniform(0,10))
+        jitter = 2 if polling_interval(config) < 60 else 10
+        time.sleep(delay+random.uniform(0,jitter))
 
 if __name__ == '__main__':
     raise SystemExit(main())

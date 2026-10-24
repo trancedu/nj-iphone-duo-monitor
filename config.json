@@ -216,5 +216,11 @@
   "selection": {
     "fixed_sku": "MK1E4LL/A",
     "additional": "random_other_variant"
-  }
+  },
+  "morning_peak": {
+    "start": "07:55",
+    "end": "08:15",
+    "interval_seconds": 20
+  },
+  "auto_open_product_page": true
 }
