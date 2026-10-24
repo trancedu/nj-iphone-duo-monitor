@@ -2,7 +2,7 @@
 
 Python 3.9+ standard-library monitor for Apple US store pickup. No packages or paid services required.
 
-- Production alerts: iPhone Duo only, both colors, 256GB only, connect to a carrier later.
+- Production alerts: iPhone Duo only, connect to a carrier later. Each cycle queries 256GB Star White first, then one randomly selected variant from the other seven color/capacity combinations.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.
 - One scan starts approximately every 60–70 seconds; two sequential SKU requests, five seconds apart. No parallel workers or overlapping scans.
 - HTTP errors back off 5, 10, 20, 40, then 60 minutes; honor longer Retry-After. No proxy rotation, CAPTCHA handling, or immediate retry loops.
@@ -33,7 +33,7 @@ Credentials: export `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, or pass `--env-
 
 `--smoke-test` checks one Pro Max and one Duo against both states, saves diagnostic JSON, never sends inventory alerts, and exits nonzero on failed regional queries. `--once` exits nonzero on failed inventory/notification processing. `--dry-run` never sends Telegram messages. Do not run diagnostic commands in tight loops.
 
-`catalog.json` and `config.json` contain the discovered Duo SKUs and product links verified against Apple's current product page. Production config.json watches only the two 256GB variants. `--discover` refreshes catalog.json; update config.json deliberately after reviewing changes.
+`catalog.json` and `config.json` contain the discovered Duo SKUs and product links verified against Apple's current product page. Production config.json lists all eight variants but queries only two per cycle: fixed 256GB Star White plus one random other variant. Random selections are independent, so other variants have no guaranteed revisit interval; they average once per seven cycles. `--discover` refreshes catalog.json; update config.json deliberately after reviewing changes.
 
 ## Mac deployment
 

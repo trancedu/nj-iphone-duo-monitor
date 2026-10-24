@@ -21,6 +21,34 @@ def payload(quote='Available Today', display='available', state='NJ'):
     return {'body':{'content':[item]}}
 
 class MonitorTests(unittest.TestCase):
+    def test_fixed_white_plus_each_random_variant(self):
+        catalog=json.loads((m.ROOT/'catalog.json').read_text())
+        config={'products':catalog,'selection':{'fixed_sku':'MK1E4LL/A'}}
+        for extra in catalog:
+            if extra == 'MK1E4LL/A': continue
+            with patch.object(m.random,'choice',return_value=extra) as choice:
+                selected=m.select_products(config)
+                self.assertEqual(list(selected),['MK1E4LL/A',extra])
+                self.assertNotIn('MK1E4LL/A',choice.call_args.args[0])
+                self.assertEqual(len(choice.call_args.args[0]),7)
+        with self.assertRaises(m.QueryError):
+            m.select_products({'products':PRODUCTS,'selection':{'fixed_sku':'missing'}})
+
+    def test_cycle_only_requests_selected_two(self):
+        catalog=json.loads((m.ROOT/'catalog.json').read_text())
+        config={'products':catalog,'selection':{'fixed_sku':'MK1E4LL/A'},'stores':{'R001':{}},'max_pickup_days':3,'interval_seconds':60,'request_gap_seconds':5}
+        class Fake:
+            def __init__(self): self.calls=[]
+            def inventory(self,sku,stores):
+                self.calls.append(sku)
+                return payload(display='unavailable')
+        client=Fake();state={}
+        with tempfile.TemporaryDirectory() as path, patch.object(m.random,'choice',return_value='MK1R4LL/A'), patch.object(m.time,'sleep'):
+            m.run_cycle(client,config,state,Path(path),dry_run=True)
+        self.assertEqual(client.calls,['MK1E4LL/A','MK1R4LL/A'])
+        self.assertEqual(state['selected_skus'],client.calls)
+        self.assertEqual(set(state['coverage']),set(client.calls))
+
     def test_dates(self):
         for quote, days in [('Available Today',0),('Available Tomorrow',1),('Oct 25',2),('October 26, 2026',3),('2026-10-24',1),('Oct 24–26',3)]:
             self.assertEqual(m.pickup_date(quote,TODAY),TODAY+dt.timedelta(days=days))

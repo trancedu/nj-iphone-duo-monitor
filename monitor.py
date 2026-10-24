@@ -169,10 +169,25 @@ def should_alert(offer, state, now):
     if not offer['name'].startswith('iPhone Duo '): return False
     return now - state.get('sent', {}).get(offer_key(offer), 0) >= 1800
 
+def select_products(config):
+    products = config['products']
+    selection = config.get('selection')
+    if not selection:
+        return products
+    fixed = selection['fixed_sku']
+    others = [sku for sku in products if sku != fixed]
+    if fixed not in products or not others:
+        raise QueryError('invalid_product_selection')
+    # Keep the priority variant first; the second request samples the other variants.
+    extra = random.choice(others)
+    return {sku:products[sku] for sku in (fixed,extra)}
+
 def run_cycle(client, config, state, runtime, dry_run=False):
     now = time.time()
     today = dt.datetime.now(TZ).date()
-    products = config['products']
+    products = select_products(config)
+    state['selected_skus'] = list(products)
+    LOG.info('cycle selected: %s', ', '.join(p['name'] for p in products.values()))
     all_offers = {}
     errors = []
     coverage = {}
