@@ -222,5 +222,90 @@
     "end": "08:15",
     "interval_seconds": 20
   },
-  "auto_open_product_page": true
+  "auto_open_product_page": true,
+  "regions": [
+    {
+      "name": "short-hills",
+      "zip": "07078",
+      "tier": "primary",
+      "expected_stores": [
+        "R032",
+        "R043",
+        "R067",
+        "R103",
+        "R104",
+        "R117",
+        "R152",
+        "R250",
+        "R251",
+        "R325",
+        "R654",
+        "R755"
+      ]
+    },
+    {
+      "name": "manhattan",
+      "zip": "10001",
+      "tier": "primary",
+      "expected_stores": [
+        "R032",
+        "R095",
+        "R250",
+        "R251",
+        "R415",
+        "R582",
+        "R594",
+        "R612",
+        "R654",
+        "R715",
+        "R753",
+        "R755"
+      ]
+    },
+    {
+      "name": "south-nj",
+      "zip": "08002",
+      "tier": "secondary",
+      "expected_stores": [
+        "R067",
+        "R088",
+        "R104",
+        "R138",
+        "R206",
+        "R549"
+      ]
+    },
+    {
+      "name": "smith-haven",
+      "zip": "11755",
+      "tier": "secondary",
+      "expected_stores": [
+        "R060",
+        "R061",
+        "R068",
+        "R139",
+        "R261",
+        "R327",
+        "R612",
+        "R753"
+      ]
+    },
+    {
+      "name": "syracuse",
+      "zip": "13290",
+      "tier": "secondary",
+      "expected_stores": [
+        "R013",
+        "R016",
+        "R017",
+        "R043",
+        "R046",
+        "R103",
+        "R107",
+        "R117",
+        "R140",
+        "R325"
+      ]
+    }
+  ]
 }

@@ -132,6 +132,13 @@ class Client:
         try: return json.loads(raw)
         except ValueError: raise QueryError('non_json_response') from None
 
+    def inventory_region(self, products, zipcode):
+        params={'pl':'true','location':zipcode}
+        params.update({'parts.'+str(i):sku for i,sku in enumerate(products)})
+        raw=self.get(BASE+'/shop/retail/pickup-message?'+urllib.parse.urlencode(params))
+        try: return json.loads(raw)
+        except ValueError: raise QueryError('non_json_response') from None
+
     def catalog(self, family='iphone-duo'):
         text = self.get(BASE+'/shop/buy-iphone/'+family)
         pattern = r'\{"sku":"[^"]+","partNumber":"([^"]+)","price":\{[^}]*\},"category":"iphone","name":"([^"]+)"\}'
@@ -223,6 +230,53 @@ def notify_offer(offer,config,state,runtime,dry_run,opened):
         opened.add(offer['sku'])
         open_product_page(offer['url'])
 
+def select_regions(config, state):
+    chosen=[]
+    for tier in ('primary','secondary'):
+        group=[r for r in config['regions'] if r['tier']==tier]
+        if not group: raise QueryError('missing_region_tier')
+        key=tier+'_region_cursor'
+        cursor=state.get(key,0)
+        chosen.append(group[cursor % len(group)])
+        state[key]=cursor+1
+    return chosen
+
+def regional_payloads(payload, products, watched, region, today):
+    body=payload.get('body',{})
+    rows=body.get('stores')
+    if not isinstance(rows,list) or not rows: raise QueryError('invalid_regional_store_schema')
+    if body.get('location') != region['zip']: raise QueryError('wrong_response_location')
+    ids=[r.get('storeNumber') for r in rows]
+    if None in ids or len(set(ids)) != len(ids): raise QueryError('invalid_regional_store_ids')
+    if set(region.get('expected_stores',[]))-set(ids): raise QueryError('regional_store_coverage_missing')
+    result={sku:{'body':{'content':[]}} for sku in products}
+    for row in rows:
+        sid=row['storeNumber']
+        if sid not in watched: continue
+        state=row.get('state',row.get('address',{}).get('state'))
+        if state not in ('NJ','NY'): raise QueryError('wrong_store_state')
+        for sku in products:
+            part=row.get('partsAvailability',{}).get(sku)
+            if not isinstance(part,dict): raise QueryError('missing_sku_in_regional_response')
+            regular=part.get('messageTypes',{}).get('regular',{})
+            enabled=regular.get('storeSelectionEnabled')
+            if not isinstance(enabled,bool): raise QueryError('missing_regional_availability_flag')
+            if part.get('pickupDisplay') not in ('available','unavailable'):
+                raise QueryError('unknown_pickup_display')
+            enabled=enabled and part['pickupDisplay']=='available'
+            record={'storeId':sid,'state':state,'address':{'address':'Apple '+row['storeName']},
+                    'storeSelectionEnabled':enabled,'pickupSearchQuote':part.get('pickupSearchQuote',''),
+                    'storePickupQuote':regular.get('storePickupQuote','')}
+            encoded=part.get('pickupEncodedUpperDateString') or regular.get('pickupEncodedUpperDateString')
+            if not encoded and enabled:
+                dates=[pickup_date(record[k],today) for k in ('pickupSearchQuote','storePickupQuote')]
+                dates=[date for date in dates if date]
+                if not dates: raise QueryError('available_without_pickup_date')
+                encoded=max(dates).strftime('%Y%m%d')
+            if encoded: record['pickupEncodedUpperDateString']=encoded
+            result[sku]['body']['content'].append(record)
+    return result
+
 def run_cycle(client, config, state, runtime, dry_run=False):
     now = time.time()
     today = dt.datetime.now(TZ).date()
@@ -233,25 +287,51 @@ def run_cycle(client, config, state, runtime, dry_run=False):
     errors = []
     coverage = {}
     opened = set()
-    for index, (sku, product) in enumerate(products.items()):
+    if config.get('regions'):
+        regions=select_regions(config,state)
+        batches=[(region['zip'],products,region) for region in regions]
+        state['regions_checked']=[r['zip'] for r in regions]
+        state['endpoint']='/shop/retail/pickup-message'
+    else:
+        batches=[(sku,{sku:product},None) for sku,product in products.items()]
+    records_by_sku={sku:{} for sku in products}
+    history=state.setdefault('coverage_history',{})
+    for index,(batch_id,batch_products,region) in enumerate(batches):
         if index: time.sleep(config['request_gap_seconds'])
         try:
-            payload = client.inventory(sku,config['stores'])
-            atomic_json(runtime/('pickup-'+sku.split('/')[0]+'.json'),payload)
-            offers, observed = parse_inventory(payload,{sku:product},today,config['max_pickup_days'],config['stores'])
-            records = payload['body']['content']
-            returned = {item['storeId'] for item in records}
-            coverage[sku] = {'checked_at':time.time(),'observations':observed,
-                             'returned_stores':sorted(returned),
-                             'unreported_stores':sorted(set(config['stores'])-returned),
-                             'states':sorted({item['state'] for item in records})}
-            for offer in offers: all_offers[offer_key(offer)] = offer
+            if region:
+                raw=client.inventory_region(batch_products,region['zip'])
+                atomic_json(runtime/('region-'+region['zip']+'.json'),raw)
+                payloads=regional_payloads(raw,batch_products,config['stores'],region,today)
+            else:
+                sku=next(iter(batch_products))
+                payloads={sku:client.inventory(sku,config['stores'])}
+            for sku,payload in payloads.items():
+                offers,observed=parse_inventory(payload,{sku:products[sku]},today,config['max_pickup_days'],config['stores'])
+                checked=time.time()
+                for record in payload['body']['content']:
+                    sid=record['storeId'];records_by_sku[sku][sid]=record
+                    history.setdefault(sku,{})[sid]={'checked_at':checked,'quote':record.get('pickupSearchQuote'),
+                        'pickup_enabled':record['storeSelectionEnabled'],'pickup_date':record.get('pickupEncodedUpperDateString')}
+                records=list(records_by_sku[sku].values());returned=set(records_by_sku[sku])
+                atomic_json(runtime/('pickup-'+sku.split('/')[0]+'.json'),{'body':{'content':records}})
+                coverage[sku]={'checked_at':checked,'observations':len(returned),'returned_stores':sorted(returned),
+                               'unreported_stores':sorted(set(config['stores'])-returned),
+                               'states':sorted({r['state'] for r in records})}
+                for offer in offers:
+                    all_offers[offer_key(offer)]=offer
+                    notify_offer(offer,config,state,runtime,dry_run,opened)
+            if region:
+                state.setdefault('coverage_by_region',{})[region['zip']]={
+                    'checked_at':time.time(),'skus':list(batch_products),
+                    'returned_stores':sorted({r['storeNumber'] for r in raw['body']['stores']} & set(config['stores']))}
         except QueryError as exc:
+            # Notification failures are retried by the outer handler; do not mark as sold out.
+            if exc.code.startswith('telegram_'): raise
             errors.append(exc)
             break
-        # Notify immediately after each successful SKU query, before the next request.
-        for offer in offers:
-            notify_offer(offer,config,state,runtime,dry_run,opened)
+    state['fresh_coverage_counts']={sku:sum(time.time()-entry['checked_at'] <= 600 for entry in stores.values())
+                                   for sku,stores in history.items()}
     state['coverage'] = coverage
     pending = sorted(all_offers.values(),key=lambda x:(x['date'],x['state'] != 'NJ',x['store']))
     state['last_cycle_at'] = now
@@ -301,6 +381,24 @@ def main():
         parser.error('minimum peak interval 20s')
     if args.smoke_test:
         # Diagnostics never call Telegram and never enter production alert state.
+        if config.get('regions'):
+            result={};covered=set();products=select_products(config)
+            for index,region in enumerate(config['regions']):
+                if index: time.sleep(10)
+                try:
+                    raw=client.inventory_region(products,region['zip'])
+                    payloads=regional_payloads(raw,products,config['stores'],region,dt.datetime.now(TZ).date())
+                    observed=set()
+                    for sku,payload in payloads.items():
+                        parse_inventory(payload,{sku:products[sku]},dt.datetime.now(TZ).date(),requested_stores=config['stores'])
+                        observed.update(row['storeId'] for row in payload['body']['content'])
+                    covered.update(observed)
+                    result[region['zip']]={'ok':True,'stores':sorted(observed)}
+                except QueryError as exc:
+                    result[region['zip']]={'ok':False,'error':exc.code};break
+            result['coverage']={'ok':covered>=set(config['stores']),'count':len(covered),'missing':sorted(set(config['stores'])-covered)}
+            atomic_json(runtime/'smoke-result.json',result)
+            print(json.dumps(result,indent=2));return int(not all(v['ok'] for v in result.values()))
         result = {}
         for family in ['iphone-18-pro','iphone-duo']:
             catalog = client.catalog(family)

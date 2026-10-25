@@ -1,0 +1,67 @@
+import copy
+import datetime as dt
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+import monitor as m
+
+TODAY=dt.date(2026,10,24)
+
+def retail(config,products,region,available=False):
+    rows=[]
+    for sid in region['expected_stores']:
+        rows.append({'storeNumber':sid,'storeName':config['stores'][sid]['name'],'state':config['stores'][sid]['state'],
+                     'partsAvailability':{sku:{'pickupDisplay':'available' if available else 'unavailable',
+                       'pickupSearchQuote':'Available Today' if available else 'Currently unavailable',
+                       'messageTypes':{'regular':{'storeSelectionEnabled':available,'storePickupQuote':'Today at Apple Test' if available else 'Currently unavailable'}}} for sku in products}})
+    return {'body':{'location':region['zip'],'stores':rows}}
+
+class RegionalTests(unittest.TestCase):
+    def setUp(self):
+        self.config=json.loads((m.ROOT/'config.json').read_text())
+        self.products={sku:self.config['products'][sku] for sku in ['MK1E4LL/A','MK1J4LL/A']}
+        self.region=self.config['regions'][0]
+    def test_available_batch_preserves_sku_store_and_pickup_date(self):
+        data=m.regional_payloads(retail(self.config,self.products,self.region,True),self.products,self.config['stores'],self.region,TODAY)
+        for sku,payload in data.items():
+            offers,count=m.parse_inventory(payload,{sku:self.products[sku]},TODAY,requested_stores=self.config['stores'])
+            self.assertEqual(count,len(self.region['expected_stores']))
+            self.assertEqual({o['sku'] for o in offers},{sku})
+            self.assertEqual({o['date'] for o in offers},{'2026-10-24'})
+    def test_ignored_location_missing_store_or_sku_fail_closed(self):
+        original=retail(self.config,self.products,self.region)
+        wrong=copy.deepcopy(original);wrong['body']['location']='wrong'
+        missing_store=copy.deepcopy(original);missing_store['body']['stores'].pop()
+        missing_sku=copy.deepcopy(original);missing_sku['body']['stores'][0]['partsAvailability'].pop('MK1J4LL/A')
+        for payload in [wrong,missing_store,missing_sku]:
+            with self.assertRaises(m.QueryError):m.regional_payloads(payload,self.products,self.config['stores'],self.region,TODAY)
+    def test_all_35_stores_covered_in_three_two_request_cycles(self):
+        config=self.config
+        class Fake:
+            def __init__(self):self.calls=[]
+            def inventory_region(self,products,zipcode):
+                self.calls.append((zipcode,list(products)))
+                region=next(r for r in config['regions'] if r['zip']==zipcode)
+                return retail(config,products,region)
+        client=Fake();state={}
+        with tempfile.TemporaryDirectory() as path,patch.object(m.random,'choice',return_value='MK1J4LL/A'),patch.object(m.time,'sleep'):
+            for _ in range(3):m.run_cycle(client,config,state,Path(path),dry_run=True)
+        self.assertEqual(len(client.calls),6)
+        self.assertTrue(all(skus==['MK1E4LL/A','MK1J4LL/A'] for _,skus in client.calls))
+        self.assertEqual(set(state['coverage_history']['MK1E4LL/A']),set(config['stores']))
+        self.assertEqual(state['fresh_coverage_counts']['MK1E4LL/A'],35)
+    def test_real_captured_responses_cover_all_35(self):
+        # Captures are local commissioning evidence, never needed by CI.
+        covered=set()
+        for region in self.config['regions']:
+            path=m.ROOT/'runtime/coverage-investigation'/('retail-'+region['name']+'.json')
+            if not path.exists():self.skipTest('commissioning captures not present')
+            raw=json.loads(path.read_text())
+            products={'MK1E4LL/A':self.products['MK1E4LL/A']}
+            normalized=m.regional_payloads(raw,products,self.config['stores'],region,TODAY)
+            covered.update(r['storeId'] for r in normalized['MK1E4LL/A']['body']['content'])
+        self.assertEqual(covered,set(self.config['stores']))
+
+if __name__=='__main__':unittest.main()
