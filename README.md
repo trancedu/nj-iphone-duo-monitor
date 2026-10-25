@@ -82,3 +82,7 @@ The watchdog respects a future retry deadline when detecting hangs. It owns heal
 Stock alerts are sent immediately after each regional batch completes, before the second regional request. Each alert includes the exact capacity/color, observation time, pickup date, store and product URL. Positive observations are also appended to `runtime/availability-events.jsonl` so future history does not rely only on overwritten snapshots.
 
 With `auto_open_product_page: true`, a newly sent stock alert also opens the exact product URL in the Mac's default browser, at most once per model per cycle. It does not select a pickup store or advance checkout. Use your regular browser with your Apple login and payment details ready; you complete checkout and confirm payment yourself. Browser-opening failures are logged separately and do not stop stock checks.
+
+## HTTP walkthrough
+
+Open [the six-page Chinese HTTP guide](docs/http-guide/index.html) locally or through a static server. It explains the current regional request URL, a trimmed real JSON response, store rotation, Telegram POST and failure handling. Interactive controls simulate locally and do not query Apple.
