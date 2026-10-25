@@ -4,7 +4,7 @@ Python 3.9+ standard-library monitor for Apple US store pickup. No packages or p
 
 - Production alerts: iPhone Duo only, connect to a carrier later. Each cycle queries 256GB Star White first, then one randomly selected variant from the other seven color/capacity combinations.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.
-- Regular scans start approximately every 60–70 seconds. Every day from 07:55 inclusive to 08:15 exclusive in America/New_York, scans start approximately every 20–22 seconds. Two sequential regional requests, five seconds apart, remain the maximum per cycle. Each request batches both selected SKUs. Failures always use the longer backoff, including during the morning window. No parallel workers or overlapping scans.
+- Regular scans start approximately every 180–190 seconds. Every day from 07:55 inclusive to 08:15 exclusive in America/New_York, scans start approximately every 60–70 seconds. Two sequential regional requests, five seconds apart, remain the maximum per cycle. Each request batches both selected SKUs. Failures always use the longer backoff, including during the morning window. No parallel workers or overlapping scans.
 - HTTP errors back off 5, 10, 20, 40, then 60 minutes; honor longer Retry-After. No proxy rotation, CAPTCHA handling, or immediate retry loops.
 - Same store/SKU/date notification suppressed for 30 minutes, including across restarts. Failed sends are retried on a later scan.
 - An independent launchd watchdog checks health every minute. Process exits/hangs must persist for two minutes; failed queries/notifications for five minutes. It sends one alert per outage and one recovery notice after two healthy checks. New outage alerts are limited to one per hour; failed Telegram attempts retry at most every five minutes. State survives restarts.
@@ -15,7 +15,7 @@ The repository was empty when cloned. The legacy `/shop/fulfillment-messages` AP
 
 The coverage investigation on 2026-10-24 verified all 35 NJ/NY store IDs using `/shop/retail/pickup-message`, with regional ZIP queries and `parts.0` / `parts.1` batching. Production now uses this endpoint. See [the investigation report](docs/coverage-investigation-2026-10-24.md).
 
-Five ZIPs (07078, 10001, 08002, 11755, 13290) cover all 35 watched stores in captured responses. Each cycle queries one rotating primary area and one rotating secondary area. The priority white 256GB model completes a full store sweep in three cycles: about 3–3.5 minutes normally, or 60–66 seconds in the morning window. Each individual store is checked when its region is queried; not all 35 stores are queried every 20 seconds. Random other variants have no fixed revisit interval.
+Five ZIPs (07078, 10001, 08002, 11755, 13290) cover all 35 watched stores in captured responses. Each cycle queries one rotating primary area and one rotating secondary area. The priority white 256GB model completes a full store sweep in three cycles: about 9–9.5 minutes normally, or 3–3.5 minutes in the morning window. Each individual store is checked when its region is queried; not all 35 stores are queried every minute. Random other variants have no fixed revisit interval.
 
 Wrong response location, missing expected stores and missing SKUs are errors, never out-of-stock results. `runtime/state.json` records per-cycle coverage and per-SKU/store observation times (`coverage_history`); `fresh_coverage_counts` uses a ten-minute freshness window. Official store directory: https://www.apple.com/retail/storelist/ .
 
@@ -77,7 +77,7 @@ The watchdog respects a future retry deadline when detecting hangs. It owns heal
 
 ## Faster morning alerts and browser shortcut
 
-`morning_peak` config enables the 07:55–08:15 local-time window at 20 seconds per cycle. This is roughly six regional inventory requests per minute during that window (both SKUs per request). This schedule is an experiment based on one observed 08:14 restock, not a guarantee of a daily release time.
+`morning_peak` config enables the 07:55–08:15 local-time window at 60 seconds per cycle. This is roughly two regional inventory requests per minute during that window (both SKUs per request). This schedule is an experiment based on one observed 08:14 restock, not a guarantee of a daily release time.
 
 Stock alerts are sent immediately after each regional batch completes, before the second regional request. Each alert includes the exact capacity/color, observation time, pickup date, store and product URL. Positive observations are also appended to `runtime/availability-events.jsonl` so future history does not rely only on overwritten snapshots.
 

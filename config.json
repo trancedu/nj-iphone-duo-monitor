@@ -1,5 +1,5 @@
 {
-  "interval_seconds": 60,
+  "interval_seconds": 180,
   "request_gap_seconds": 5,
   "max_pickup_days": 3,
   "products": {
@@ -220,7 +220,7 @@
   "morning_peak": {
     "start": "07:55",
     "end": "08:15",
-    "interval_seconds": 20
+    "interval_seconds": 60
   },
   "auto_open_product_page": true,
   "regions": [
