@@ -237,6 +237,7 @@ def run(args):
         m.load_env(args.env_file)
     config = json.loads((m.ROOT / 'config.json').read_text())
     config['auto_open_product_page'] = False
+    selected = m.select_products(config)
     state_path = runtime / 'state.json'
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     state.setdefault('sent', {})
@@ -246,6 +247,8 @@ def run(args):
               'duration_seconds': args.duration, 'target_start_spacing': args.spacing,
               'minimum_ip_interval': args.min_ip_interval, 'requested_max_nodes': args.max_nodes,
               'zip': args.zip, 'counts': {}, 'alerts_sent': 0, 'notification_errors': 0,
+              'monitored_skus': list(selected),
+              'monitored_products': [item['name'] for item in selected.values()],
               'telegram_configured': bool(os.environ.get('TELEGRAM_BOT_TOKEN') and os.environ.get('TELEGRAM_CHAT_ID')),
               'status': 'preparing', 'output': str(output)}
 
@@ -288,7 +291,7 @@ def run(args):
                             event.update(result='http_200', stores=len(raw['body']['stores']), eligible_offers=len(offers))
                             report['last_success_at'] = dt.datetime.now(m.TZ).isoformat()
                             for offer in offers:
-                                if not report['telegram_configured'] or time.monotonic() >= deadline or stop:
+                                if time.monotonic() >= deadline or stop:
                                     continue
                                 should_send = m.should_alert(offer, state, time.time())
                                 try:

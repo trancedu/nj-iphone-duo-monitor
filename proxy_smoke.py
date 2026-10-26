@@ -87,7 +87,7 @@ def main():
     if any(node not in proxies for node in nodes):
         parser.error('A selected node is absent from the active config')
     report = {'started_at': dt.datetime.now(m.TZ).isoformat(), 'zip': args.zip,
-              'skus': ['MK1E4LL/A', 'MK1J4LL/A'], 'results': [],
+              'skus': list(m.select_products(json.loads((m.ROOT / 'config.json').read_text()))), 'results': [],
               'scope': 'One bounded diagnostic; no retries, alerts, or production changes'}
     if args.compare_three:
         report['scope'] = f'Explicit {len(nodes)}-node comparison: one inventory request per node, three-second gaps, no retries'

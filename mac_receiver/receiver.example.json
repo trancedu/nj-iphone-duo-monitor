@@ -1,0 +1,17 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "allowed_sources": ["127.0.0.1", "192.168.1.10"],
+  "secret_env": "PICKUP_SHARED_SECRET",
+  "dry_run": true,
+  "prewarm_browser": false,
+  "selectors_verified": false,
+  "profile_dir": "./apple-browser-profile",
+  "state_dir": "./runtime",
+  "step_timeout_ms": 20000,
+  "selectors": {
+    "bag_item": "[data-autom=\"bag-item\"]",
+    "store_list": "[data-autom=\"store-list\"]",
+    "store_row": "[data-autom=\"store-row\"]"
+  }
+}

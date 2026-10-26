@@ -1,8 +1,16 @@
 # NJ / NY iPhone Duo pickup monitor
 
-Python 3.9+ standard-library monitor for Apple US store pickup. No packages or paid services required.
+Python 3.9+ standard-library monitor for Apple US store pickup.
 
-- Production alerts: iPhone Duo only, connect to a carrier later. Each cycle queries 256GB Star White first, then one randomly selected variant from the other seven color/capacity combinations.
+## Split pickup response (Mac mini → Mac)
+
+The optional [split pickup deployment guide](docs/split-pickup-deployment.md) delivers authenticated LAN events without blocking inventory polling. The separate [Mac receiver](mac_receiver/README.md) prewarms a dedicated Chrome profile and stops at the pickup store list for manual handoff. Start in dry-run; live Apple Pay and page selectors must be verified on the receiving Mac. The bridge is disabled unless explicitly configured. Existing Telegram stock alerts remain enabled.
+
+## Current stock monitoring
+
+Current Mac deployment (2026-10-26): `proxy_monitor.py` queries ZIP **07094 (12 stores)** using all three cached subscriptions. Every request includes **all four 256GB/512GB color combinations**. Starts are paced at least two seconds apart, with at most four in flight, a 60-second minimum per measured IP, and persistent cooldowns. Successful refreshes can take longer than two seconds. The older non-proxy service below remains stopped.
+
+- Production alerts: iPhone Duo only, connect to a carrier later. Every request batches all four 256GB/512GB × Star White/Night Sky configurations; 1TB and 2TB are excluded.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.
 - Regular scans start approximately every 180–190 seconds. Every day from 07:55 inclusive to 08:15 exclusive in America/New_York, scans start approximately every 60–70 seconds. Two sequential regional requests, five seconds apart, remain the maximum per cycle. Each request batches both selected SKUs. Failures always use the longer backoff, including during the morning window. No parallel workers or overlapping scans.
 - HTTP errors back off 5, 10, 20, 40, then 60 minutes; honor longer Retry-After. No proxy rotation, CAPTCHA handling, or immediate retry loops.
@@ -41,7 +49,7 @@ Credentials: export `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, or pass `--env-
 
 `--smoke-test` checks the selected two Duo variants across every configured region, ten seconds apart, saves diagnostic JSON, never sends inventory alerts, and exits nonzero on failed regional queries or incomplete configured-store coverage. `--once` exits nonzero on failed inventory/notification processing. `--dry-run` never sends Telegram messages. Do not run diagnostic commands in tight loops.
 
-`catalog.json` and `config.json` contain the discovered Duo SKUs and product links verified against Apple's current product page. Production config.json lists all eight variants but queries only two per cycle: fixed 256GB Star White plus one random other variant. Random selections are independent, so other variants have no guaranteed revisit interval; they average once per seven cycles. `--discover` refreshes catalog.json; update config.json deliberately after reviewing changes.
+`catalog.json` and `config.json` contain the discovered Duo SKUs and product links verified against Apple's current product page. Production config.json contains only the four monitored 256GB/512GB variants, with `selection.skus` explicitly batching all four. `catalog.json` preserves the full eight-model reference catalog. `--discover` refreshes catalog.json; update config.json deliberately after reviewing changes.
 
 ## Mac deployment
 

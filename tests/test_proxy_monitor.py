@@ -157,6 +157,7 @@ class ProxyMonitorTests(unittest.TestCase):
             self.assertEqual(report['status'], 'completed')
             self.assertEqual(report['counts'], {'http_200': 1})
             self.assertEqual(report['alerts_sent'], 0)
+            self.assertEqual(report['monitored_skus'], config['selection']['skus'])
             self.assertLess(report['elapsed_seconds'], .5)
             state = json.loads((root / 'runtime/proxy-monitor/state.json').read_text())
             self.assertIn('last_started_at', state['exits']['test-ip'])

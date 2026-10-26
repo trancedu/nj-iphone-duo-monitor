@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.parse
 from unittest.mock import patch
 import monitor as m
 
@@ -21,6 +22,26 @@ def payload(quote='Available Today', display='available', state='NJ'):
     return {'body':{'content':[item]}}
 
 class MonitorTests(unittest.TestCase):
+    def test_all_four_configurations_share_one_regional_request(self):
+        config=json.loads((m.ROOT/'config.json').read_text())
+        with patch.object(m.random,'choice',side_effect=AssertionError('must not sample')):
+            products=m.select_products(config)
+        self.assertEqual({p['name'] for p in products.values()}, {
+            'iPhone Duo 256GB Star White','iPhone Duo 256GB Night Sky',
+            'iPhone Duo 512GB Star White','iPhone Duo 512GB Night Sky'})
+        client=m.Client()
+        with patch.object(client,'get',return_value='{}') as get:
+            client.inventory_region(products,'07094')
+        get.assert_called_once()
+        query=urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query)
+        self.assertEqual(query['location'],['07094'])
+        self.assertEqual({v[0] for k,v in query.items() if k.startswith('parts.')},set(products))
+
+    def test_explicit_batch_rejects_missing_duplicate_or_empty_skus(self):
+        for skus in [[],['missing'],['DUO','DUO'],'DUO',[None]]:
+            with self.assertRaises(m.QueryError):
+                m.select_products({'products':PRODUCTS,'selection':{'skus':skus}})
+
     def test_fixed_white_plus_each_random_variant(self):
         catalog=json.loads((m.ROOT/'catalog.json').read_text())
         config={'products':catalog,'selection':{'fixed_sku':'MK1E4LL/A'}}

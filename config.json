@@ -3,37 +3,21 @@
   "request_gap_seconds": 5,
   "max_pickup_days": 3,
   "products": {
+    "MK1E4LL/A": {
+      "name": "iPhone Duo 256GB Star White",
+      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-256gb-star-white-unlocked"
+    },
     "MK1F4LL/A": {
       "name": "iPhone Duo 256GB Night Sky",
       "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-256gb-night-sky-unlocked"
-    },
-    "MK1H4LL/A": {
-      "name": "iPhone Duo 512GB Night Sky",
-      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-512gb-night-sky-unlocked"
     },
     "MK1G4LL/A": {
       "name": "iPhone Duo 512GB Star White",
       "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-512gb-star-white-unlocked"
     },
-    "MK1E4LL/A": {
-      "name": "iPhone Duo 256GB Star White",
-      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-256gb-star-white-unlocked"
-    },
-    "MK1L4LL/A": {
-      "name": "iPhone Duo 1TB Night Sky",
-      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-1tb-night-sky-unlocked"
-    },
-    "MK1Q4LL/A": {
-      "name": "iPhone Duo 2TB Star White",
-      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-2tb-star-white-unlocked"
-    },
-    "MK1J4LL/A": {
-      "name": "iPhone Duo 1TB Star White",
-      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-1tb-star-white-unlocked"
-    },
-    "MK1R4LL/A": {
-      "name": "iPhone Duo 2TB Night Sky",
-      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-2tb-night-sky-unlocked"
+    "MK1H4LL/A": {
+      "name": "iPhone Duo 512GB Night Sky",
+      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-512gb-night-sky-unlocked"
     }
   },
   "stores": {
@@ -149,8 +133,12 @@
     }
   },
   "selection": {
-    "fixed_sku": "MK1E4LL/A",
-    "additional": "random_other_variant"
+    "skus": [
+      "MK1E4LL/A",
+      "MK1F4LL/A",
+      "MK1G4LL/A",
+      "MK1H4LL/A"
+    ]
   },
   "morning_peak": {
     "start": "07:55",

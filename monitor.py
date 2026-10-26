@@ -182,11 +182,18 @@ def select_products(config):
     selection = config.get('selection')
     if not selection:
         return products
+    if 'skus' in selection:
+        skus = selection['skus']
+        if (not isinstance(skus, list) or not skus or
+                any(not isinstance(sku, str) or sku not in products for sku in skus) or
+                len(set(skus)) != len(skus)):
+            raise QueryError('invalid_product_selection')
+        return {sku: products[sku] for sku in skus}
     fixed = selection['fixed_sku']
     others = [sku for sku in products if sku != fixed]
     if fixed not in products or not others:
         raise QueryError('invalid_product_selection')
-    # Keep the priority variant first; the second request samples the other variants.
+    # Legacy selection mode: always include the priority variant and sample one other.
     extra = random.choice(others)
     return {sku:products[sku] for sku in (fixed,extra)}
 
@@ -217,6 +224,14 @@ def notify_offer(offer,config,state,runtime,dry_run,opened):
     event={'observed_at':dt.datetime.now(TZ).isoformat(),**offer}
     with (runtime/'availability-events.jsonl').open('a') as output:
         output.write(json.dumps(event,ensure_ascii=False)+'\n')
+    # Independent durable outbox: network retries never run on the polling thread.
+    # Its event ID/deduplication survives Telegram failures and process restarts.
+    if not dry_run and offer['name'].startswith('iPhone Duo '):
+        try:
+            from pickup_bridge import enqueue_confirmed_offer
+            enqueue_confirmed_offer(event, runtime, telegram)
+        except Exception:
+            LOG.error('pickup bridge unavailable; stock alert continues')
     if not should_alert(offer,state,now): return
     message=('📱 iPhone Duo 可 Pickup\n'+offer['name']+'\n'+offer['state']+' · '+offer['store']+
              '\n取货日期：'+offer['date']+'（美东）\n发现时间：'+dt.datetime.now(TZ).strftime('%H:%M:%S')+

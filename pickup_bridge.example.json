@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "endpoint": "http://192.168.1.11:8765/prepare",
+  "secret_env": "PICKUP_SHARED_SECRET",
+  "timeout_seconds": 1,
+  "max_attempts": 3,
+  "retry_delays_seconds": [0.5, 1]
+}

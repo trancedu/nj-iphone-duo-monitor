@@ -21,7 +21,7 @@ def retail(config,products,region,available=False):
 class RegionalTests(unittest.TestCase):
     def setUp(self):
         self.config=json.loads((m.ROOT/'config.json').read_text())
-        self.products={sku:self.config['products'][sku] for sku in ['MK1E4LL/A','MK1J4LL/A']}
+        self.products={sku:self.config['products'][sku] for sku in ['MK1E4LL/A','MK1G4LL/A']}
         self.region=self.config['regions'][0]
     def test_available_batch_preserves_sku_store_and_pickup_date(self):
         data=m.regional_payloads(retail(self.config,self.products,self.region,True),self.products,self.config['stores'],self.region,TODAY)
@@ -34,7 +34,7 @@ class RegionalTests(unittest.TestCase):
         original=retail(self.config,self.products,self.region)
         wrong=copy.deepcopy(original);wrong['body']['location']='wrong'
         missing_store=copy.deepcopy(original);missing_store['body']['stores'].pop()
-        missing_sku=copy.deepcopy(original);missing_sku['body']['stores'][0]['partsAvailability'].pop('MK1J4LL/A')
+        missing_sku=copy.deepcopy(original);missing_sku['body']['stores'][0]['partsAvailability'].pop('MK1G4LL/A')
         for payload in [wrong,missing_store,missing_sku]:
             with self.assertRaises(m.QueryError):m.regional_payloads(payload,self.products,self.config['stores'],self.region,TODAY)
     def test_fixed_pair_covers_all_22_stores_in_each_two_request_cycle(self):
@@ -46,12 +46,12 @@ class RegionalTests(unittest.TestCase):
                 region=next(r for r in config['regions'] if r['zip']==zipcode)
                 return retail(config,products,region)
         client=Fake();state={}
-        with tempfile.TemporaryDirectory() as path,patch.object(m.random,'choice',return_value='MK1J4LL/A'),patch.object(m.time,'sleep'):
+        with tempfile.TemporaryDirectory() as path,patch.object(m.random,'choice',return_value='MK1G4LL/A'),patch.object(m.time,'sleep'):
             for _ in range(3):
                 m.run_cycle(client,config,state,Path(path),dry_run=True)
                 self.assertEqual(set(state['coverage']['MK1E4LL/A']['returned_stores']),set(config['stores']))
         self.assertEqual(len(client.calls),6)
-        self.assertTrue(all(skus==['MK1E4LL/A','MK1J4LL/A'] for _,skus in client.calls))
+        self.assertTrue(all(skus==config['selection']['skus'] for _,skus in client.calls))
         self.assertEqual(set(state['coverage_history']['MK1E4LL/A']),set(config['stores']))
         self.assertEqual(state['fresh_coverage_counts']['MK1E4LL/A'],22)
         self.assertEqual([z for z,_ in client.calls],['07078','11530']*3)
