@@ -26,6 +26,43 @@ DEFAULT_CONFIG = Path.home() / 'Library/Application Support/io.github.clash-verg
 DEFAULT_BINARY = '/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo'
 
 
+def yaml_data(path):
+    result = subprocess.run(['ruby', '-ryaml', '-rjson', '-e',
+                             'puts JSON.generate(YAML.load_file(ARGV[0]))', str(path)],
+                            capture_output=True, check=True)
+    return json.loads(result.stdout)
+
+
+def subscription_paths(config_path, all_subscriptions=False):
+    if not all_subscriptions:
+        return [Path(config_path)]
+    base = Path(config_path).parent
+    profiles = yaml_data(base / 'profiles.yaml')
+    paths = [base / 'profiles' / item['file'] for item in profiles.get('items', [])
+             if item.get('type') == 'remote' and item.get('file')]
+    if not paths:
+        raise RuntimeError('No remote subscription profiles found')
+    return paths
+
+
+def subscription_nodes(paths):
+    """Read locally cached subscriptions; never fetch or log subscription URLs."""
+    nodes = []
+    for path in paths:
+        source = yaml_data(path)
+        if source.get('proxy-providers'):
+            raise RuntimeError('Provider-only subscriptions need explicit materialization')
+        for original in source.get('proxies', []):
+            name = original.get('name', '')
+            if not original.get('type') or any(word in name.lower() for word in
+                    ('剩余流量', '套餐到期', '流量重置', 'expire', 'traffic remaining')):
+                continue
+            node = dict(original)
+            node['name'] = Path(path).stem + '::' + name
+            nodes.append(node)
+    return nodes
+
+
 class TimedClient(m.Client):
     def __init__(self, port, timeout=10):
         super().__init__()
@@ -51,16 +88,16 @@ class TimedClient(m.Client):
 
 
 def node_priority(name):
+    name = name.split('::', 1)[-1]
     return 0 if name.startswith('🇺🇸') else 1 if name.startswith('🇬🇧') else 2
 
 
 @contextmanager
-def private_proxy(config_path, binary, output, limit):
-    source = subprocess.run(['ruby', '-ryaml', '-rjson', '-e',
-                             'puts JSON.generate(YAML.load_file(ARGV[0]))', str(config_path)],
-                            capture_output=True, check=True)
-    proxies = [p for p in json.loads(source.stdout)['proxies']
-               if p['name'].startswith(('🇺🇸', '🇬🇧', '🇯🇵', '🇭🇰', '🇸🇬', '🇨🇳'))]
+def private_proxy(config_path, binary, output, limit, selected_names=None):
+    paths = config_path if isinstance(config_path, list) else [config_path]
+    proxies = subscription_nodes(paths)
+    if selected_names is not None:
+        proxies = [p for p in proxies if p['name'] in selected_names]
     proxies.sort(key=lambda p: node_priority(p['name']))
     proxies = proxies[:limit]
     if not proxies:
@@ -220,7 +257,10 @@ def run(args):
     save()
     started = None
     try:
-        with private_proxy(args.clash_config, args.mihomo, output, args.max_nodes) as candidates:
+        paths = subscription_paths(args.clash_config, getattr(args, 'all_subscriptions', False))
+        report['subscription_sources'] = [path.stem for path in paths]
+        report['workers'] = getattr(args, 'workers', 1)
+        with private_proxy(paths, args.mihomo, output, args.max_nodes) as candidates:
             report['actual_nodes'] = len(candidates)
             pool = discover_pool(candidates, output)
             report['unique_exits'] = len(pool)
@@ -231,55 +271,71 @@ def run(args):
             next_start = started
             counts = collections.Counter()
             save()
-            with (output / 'queries.jsonl').open('a', buffering=1) as events:
-                while not stop and time.monotonic() < deadline:
+            # Workers only perform network I/O. The main thread owns all mutable
+            # state, cooldowns, notification deduplication, and request admission.
+            pending = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=report['workers']) as executor, \
+                    (output / 'queries.jsonl').open('a', buffering=1) as events:
+                while pending or (not stop and time.monotonic() < deadline):
+                    for future in [f for f in pending if f.done()]:
+                        row, event, products, request_start = pending.pop(future)
+                        record = state['exits'][row['ip']]
+                        try:
+                            raw = future.result()
+                            offers = parse_offers(raw, products, config, args.zip)
+                            m.atomic_json(output / 'last-inventory.json', raw)
+                            record_result(state, row['ip'], time.time())
+                            event.update(result='http_200', stores=len(raw['body']['stores']), eligible_offers=len(offers))
+                            report['last_success_at'] = dt.datetime.now(m.TZ).isoformat()
+                            for offer in offers:
+                                if not report['telegram_configured'] or time.monotonic() >= deadline or stop:
+                                    continue
+                                should_send = m.should_alert(offer, state, time.time())
+                                try:
+                                    m.notify_offer(offer, config, state, runtime, False, set())
+                                    if should_send:
+                                        report['alerts_sent'] += 1
+                                except m.QueryError:
+                                    report['notification_errors'] += 1
+                        except m.QueryError as exc:
+                            event.update(result=exc.code, retry_after=exc.retry_after)
+                            record_result(state, row['ip'], time.time(), exc, args.cooldown)
+                        event['completed_at'] = dt.datetime.now(m.TZ).isoformat()
+                        event['elapsed_seconds'] = round(time.monotonic() - request_start, 3)
+                        event['blocked_until'] = record.get('blocked_until', 0)
+                        counts[event['result']] += 1
+                        report['counts'] = dict(counts)
+                        report['queries'] = sum(counts.values())
+                        report['elapsed_seconds'] = round(time.monotonic() - started, 3)
+                        report['last_query_at'] = event['completed_at']
+                        events.write(json.dumps(event, ensure_ascii=False) + '\n')
+                        save()
+                    if stop or time.monotonic() >= deadline:
+                        if pending:
+                            time.sleep(.02)
+                        continue
+                    active_ips = {entry[0]['ip'] for entry in pending.values()}
+                    eligible = [row for row in pool if row['ip'] not in active_ips]
+                    if len(pending) >= report['workers'] or not eligible:
+                        time.sleep(.02)
+                        continue
                     now = time.time()
-                    row = next_ready(pool, state, now, args.min_ip_interval)
+                    row = next_ready(eligible, state, now, args.min_ip_interval)
                     wait = max(0, ready_at(row['ip'], state, args.min_ip_interval) - now,
                                next_start - time.monotonic())
                     if wait:
-                        time.sleep(min(wait, 1, max(0, deadline - time.monotonic())))
+                        time.sleep(min(wait, .1, max(0, deadline - time.monotonic())))
                         continue
                     request_start = time.monotonic()
-                    record = state.setdefault('exits', {}).setdefault(row['ip'], {})
-                    record['last_started_at'] = time.time()
+                    state.setdefault('exits', {}).setdefault(row['ip'], {})['last_started_at'] = time.time()
                     next_start = request_start + args.spacing
                     products = m.select_products(config)
                     event = {'at': dt.datetime.now(m.TZ).isoformat(), 'node': row['node'], 'ip': row['ip'],
                              'start_seconds': round(request_start - started, 3), 'skus': list(products)}
-                    save()  # Persist the per-IP start before issuing a request.
-                    row['client'].timeout = min(10, max(.1, deadline - time.monotonic()))
-                    try:
-                        raw = row['client'].inventory_region(products, args.zip)
-                        offers = parse_offers(raw, products, config, args.zip)
-                        m.atomic_json(output / 'last-inventory.json', raw)
-                        record_result(state, row['ip'], time.time())
-                        event.update(result='http_200', stores=len(raw['body']['stores']), eligible_offers=len(offers))
-                        report['last_success_at'] = event['at']
-                        for offer in offers:
-                            if not report['telegram_configured'] or time.monotonic() >= deadline or stop:
-                                continue
-                            should_send = m.should_alert(offer, state, time.time())
-                            try:
-                                # Existing date/model validation and 30m duplicate suppression.
-                                m.notify_offer(offer, config, state, runtime, False, set())
-                                if should_send:
-                                    report['alerts_sent'] += 1
-                            except m.QueryError:
-                                report['notification_errors'] += 1
-                                # Failures are recorded locally; never send failure messages.
-                    except m.QueryError as exc:
-                        event.update(result=exc.code, retry_after=exc.retry_after)
-                        record_result(state, row['ip'], time.time(), exc, args.cooldown)
-                    event['elapsed_seconds'] = round(time.monotonic() - request_start, 3)
-                    event['blocked_until'] = record.get('blocked_until', 0)
-                    counts[event['result']] += 1
-                    report['counts'] = dict(counts)
-                    report['queries'] = sum(counts.values())
-                    report['elapsed_seconds'] = round(time.monotonic() - started, 3)
-                    report['last_query_at'] = event['at']
-                    events.write(json.dumps(event, ensure_ascii=False) + '\n')
                     save()
+                    row['client'].timeout = min(10, max(.1, deadline - time.monotonic()))
+                    future = executor.submit(row['client'].inventory_region, products, args.zip)
+                    pending[future] = (row, event, products, request_start)
             report['status'] = 'stopped_by_signal' if stop else 'completed'
     except Exception as exc:
         report.update(status='failed', software_error=type(exc).__name__)
@@ -298,7 +354,9 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--duration', type=int, default=600, help='Polling duration; zero runs until stopped')
-    parser.add_argument('--max-nodes', type=int, default=60)
+    parser.add_argument('--max-nodes', type=int, default=256)
+    parser.add_argument('--workers', type=int, default=1, help='Bounded in-flight requests; starts still obey spacing')
+    parser.add_argument('--all-subscriptions', action='store_true', help='Merge all locally cached remote profiles')
     parser.add_argument('--spacing', type=float, default=2)
     parser.add_argument('--min-ip-interval', type=float, default=60)
     parser.add_argument('--cooldown', type=float, default=300)
@@ -307,8 +365,8 @@ def main():
     parser.add_argument('--clash-config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--mihomo', default=DEFAULT_BINARY)
     args = parser.parse_args()
-    if args.duration < 0 or not 1 <= args.max_nodes <= 60 or args.spacing < 2 or args.min_ip_interval < 60 or args.cooldown < 300:
-        parser.error('Require duration >=0, nodes 1–60, spacing >=2s, per-IP interval >=60s, cooldown >=300s')
+    if args.duration < 0 or not 1 <= args.max_nodes <= 256 or not 1 <= args.workers <= 8 or args.spacing < 2 or args.min_ip_interval < 60 or args.cooldown < 300:
+        parser.error('Require duration >=0, nodes 1–256, workers 1–8, spacing >=2s, per-IP interval >=60s, cooldown >=300s')
     try:
         run(args)
     except Exception as exc:

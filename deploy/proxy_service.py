@@ -38,7 +38,7 @@ def main():
     runtime = ROOT / 'runtime/proxy-monitor'
     runtime.mkdir(parents=True, exist_ok=True)
     argv = ['/usr/bin/caffeinate', '-i', sys.executable, str(ROOT / 'proxy_monitor.py'),
-            '--duration', '600' if kind == 'test' else '0', '--max-nodes', '60',
+            '--duration', '600' if kind == 'test' else '0', '--max-nodes', '256', '--all-subscriptions', '--workers', '4',
             '--spacing', '2', '--min-ip-interval', '60', '--cooldown', '300',
             '--zip', '07094', '--env-file', str(args.env_file.resolve()),
             '--clash-config', str(args.clash_config.resolve()), '--mihomo', str(args.mihomo.resolve())]
