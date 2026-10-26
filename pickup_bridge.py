@@ -167,7 +167,7 @@ class Bridge:
             if exhausted:
                 self.warning(event_id, 'Mac 不在线、未就绪或接收失败', now)
             return
-        running = status in ('queued', 'running')
+        running = status in ('held', 'queued', 'running')
         new_phase = 'watching' if running and now < deadline else 'done'
         outcome = 'receiver_timeout' if running and now >= deadline else status
         with self.connect() as c:
@@ -176,7 +176,7 @@ class Bridge:
         timestamps = {k:v for k,v in reply.get('timestamps', {}).items() if k in
                       ('received_at','opened_at','bag_ready_at','apple_pay_at','handoff_at','finished_at') and isinstance(v,str)}
         self.log(event_id, phase='received', receiver_status=outcome, timestamps=timestamps)
-        if outcome in ('busy','manual_review','pickup_unavailable','interrupted','receiver_timeout','browser_not_ready'):
+        if outcome in ('busy','manual_review','pickup_unavailable','interrupted','receiver_timeout','browser_not_ready','expired','queue_full'):
             self.warning(event_id, outcome, now)
 
     def run(self):

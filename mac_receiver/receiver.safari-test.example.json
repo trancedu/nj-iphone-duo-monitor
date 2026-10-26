@@ -1,0 +1,16 @@
+{
+  "safari_test_state_dir": "runtime-safari",
+  "pickup_zip": "07094",
+  "pickup_unavailable_retries": 5,
+  "pickup_retry_interval_ms": 1000,
+  "test_any_available_store": true,
+  "pickup_details": {
+    "store_name": "Apple West 14th Street",
+    "preferred_slot": 2,
+    "min_lead_minutes": 0,
+    "first_name": "Test",
+    "last_name": "User",
+    "email": "test@example.com",
+    "phone": "2025550123"
+  }
+}

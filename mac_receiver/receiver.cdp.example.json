@@ -1,0 +1,26 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "allowed_sources": [
+    "127.0.0.1"
+  ],
+  "secret_env": "PICKUP_SHARED_SECRET",
+  "dry_run": true,
+  "prewarm_browser": true,
+  "selectors_verified": false,
+  "cdp_endpoint": "http://127.0.0.1:9222",
+  "profile_dir": "./apple-browser-profile",
+  "state_dir": "./runtime",
+  "pickup_zip": "07094",
+  "step_timeout_ms": 20000,
+  "selectors": {
+    "bag_item": "[role=\"listitem\"][data-autom^=\"bag-item-\"]",
+    "store_list": "fieldset:has(legend:has-text(\"Select your pickup store:\"))",
+    "store_row": ".rt-storelocator-store-group"
+  },
+  "auto_clear_bag": false,
+  "queue_while_busy": false,
+  "max_pending_events": 8,
+  "held_event_ttl_seconds": 180,
+  "release_on_task_tab_close": false
+}

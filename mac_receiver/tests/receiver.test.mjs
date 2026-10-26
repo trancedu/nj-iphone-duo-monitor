@@ -83,3 +83,57 @@ test('in-flight restart becomes interrupted and never resumes browser work',asyn
   const restarted=new Engine(h.config,{ready:()=>true});assert.equal(restarted.state.events[e.event_id].status,'interrupted');assert.equal(restarted.state.active,e.event_id);
   await nextTurn();
 });
+test('hold queue is durable, deduplicated, bounded and runs only after release',async t=>{
+  const calls=[];
+  const h=await harness(t,false,{ready:()=>true,prepare:async e=>{calls.push(e.event_id);return 'awaiting_user';},handoff:async()=>{}});
+  Object.assign(h.config,{queue_while_busy:true,max_pending_events:1});
+  await h.request('/prepare',event());await nextTurn();await nextTurn();
+  const next={...event('held-two'),detected_at:new Date().toISOString()};
+  assert.equal((await h.request('/prepare',next)).body.status,'held');
+  assert.equal((await h.request('/prepare',next)).code,200);
+  assert.equal((await h.request('/prepare',{...next,event_id:'overflow'})).code,429);
+  assert.deepEqual(calls,['event-one']);
+  await h.request('/reset',{event_id:'event-one',confirm:true});await nextTurn();await nextTurn();
+  assert.deepEqual(calls,['event-one','held-two']);assert.equal(h.engine.state.active,'held-two');
+});
+test('expired held events and held events surviving restart never execute',async t=>{
+  const calls=[];
+  const h=await harness(t,false,{ready:()=>true,prepare:async e=>{calls.push(e.event_id);return 'awaiting_user';},handoff:async()=>{}});
+  h.config.queue_while_busy=true;
+  await h.request('/prepare',event());await nextTurn();await nextTurn();
+  await h.request('/prepare',{...event('stale-held'),detected_at:new Date(Date.now()-200000).toISOString()});
+  assert.equal((await h.request('/status/stale-held')).body.status,'expired');
+  await h.request('/prepare',{...event('fresh-held'),detected_at:new Date().toISOString()});
+  const restarted=new Engine(h.config,{ready:()=>true});
+  assert.equal(restarted.state.events['fresh-held'].status,'expired');assert.equal(restarted.state.active,'event-one');
+  assert.deepEqual(calls,['event-one']);
+});
+test('closing only the completed task tab releases held work; disconnect preserves lock',async t=>{
+  const calls=[],oldPage={id:'task'};
+  let connected=true;
+  const browser={page:oldPage,ready:()=>connected,ensurePage:async()=>{if(!connected)throw new Stop('browser_not_ready');browser.page={id:'next'};},prepare:async e=>{calls.push(e.event_id);return 'awaiting_user';},handoff:async()=>{}};
+  const h=await harness(t,false,browser);Object.assign(h.config,{queue_while_busy:true,release_on_task_tab_close:true});
+  await h.request('/prepare',event());await nextTurn();await nextTurn();
+  await h.request('/prepare',{...event('held-two'),detected_at:new Date().toISOString()});
+  await h.engine.tabClosed({id:'unrelated'});assert.equal(h.engine.state.active,'event-one');
+  connected=false;await assert.rejects(()=>h.engine.tabClosed(oldPage));assert.equal(h.engine.state.active,'event-one');
+  connected=true;await h.engine.tabClosed(oldPage);await nextTurn();await nextTurn();
+  assert.deepEqual(calls,['event-one','held-two']);assert.equal(h.engine.state.active,'held-two');
+});
+test('incoming event recreates an idle closed work tab without releasing an active task',async t=>{
+  let ready=false,created=0,prepared=0;
+  const browser={ready:()=>ready,ensurePage:async()=>{created++;ready=true;},prepare:async()=>{prepared++;return 'awaiting_user';},handoff:async()=>{}};
+  const h=await harness(t,false,browser);
+  assert.equal((await h.request('/prepare',event())).code,202);await nextTurn();await nextTurn();
+  assert.equal(created,1);assert.equal(prepared,1);
+  ready=false;
+  assert.equal((await h.request('/prepare',event('another'))).body.status,'busy');
+  assert.equal(created,1);assert.equal(h.engine.state.active,'event-one');
+});
+test('production sold-out outcome reseeds and releases, but seed failure preserves lock',async t=>{
+  let seeds=0,fail=false;
+  const browser={ready:()=>true,prepare:async()=>{throw new Stop('pickup_unavailable');},handoff:async()=>{},seedIdle:async()=>{seeds++;if(fail)throw Error('restore failed');}};
+  const h=await harness(t,false,browser);h.config.auto_release_unavailable=true;
+  await h.request('/prepare',event());await nextTurn();await nextTurn();assert.equal(seeds,1);assert.equal(h.engine.state.active,null);
+  fail=true;await h.request('/prepare',event('failed-restore'));await nextTurn();await nextTurn();assert.equal(h.engine.state.active,'failed-restore');assert.equal(h.engine.state.events['failed-restore'].reason,'standby_restore_failed');
+});

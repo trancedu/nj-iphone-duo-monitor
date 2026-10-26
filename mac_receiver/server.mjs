@@ -6,10 +6,10 @@ import {authorized,normalizeIP,privateIPv4,validateEvent,Stop} from './protocol.
 import {Engine} from './engine.mjs';
 import {PickupBrowser} from './browser.mjs';
 
-export function createReceiver(config,browser,secret) {
+export function createReceiver(config,browser,secret,suppliedEngine=null) {
   if(typeof secret!=='string'||secret.length<32) throw new Stop('secret_too_short');
   const allowed=new Set(config.allowed_sources);
-  const engine=new Engine(config,browser);
+  const engine=suppliedEngine||new Engine(config,browser);
   const server=http.createServer({maxHeaderSize:8192},async(req,res)=>{
     const send=(code,body)=>{res.writeHead(code,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(body));};
     if(!allowed.has(normalizeIP(req.socket.remoteAddress))) return send(403,{status:'source_forbidden'});
@@ -20,6 +20,7 @@ export function createReceiver(config,browser,secret) {
       if(url.search) return send(400,{status:'invalid_path'});
       if(req.method==='GET'&&url.pathname==='/health') return send(200,engine.health());
       if(req.method==='GET'&&/^\/status\/[A-Za-z0-9_-]{1,128}$/.test(url.pathname)) {
+        engine.expireHeld();
         const item=engine.state.events[url.pathname.slice(8)];
         return item?send(200,engine.public(item)):send(404,{status:'not_found'});
       }
@@ -34,9 +35,13 @@ export function createReceiver(config,browser,secret) {
       if(url.pathname==='/reset') {
         if(!['127.0.0.1','::1'].includes(normalizeIP(req.socket.remoteAddress))) return send(403,{status:'local_reset_only'});
         if(raw?.confirm!==true||typeof raw.event_id!=='string') return send(400,{status:'explicit_reset_required'});
-        return send(200,{status:engine.reset(raw.event_id)?'reset':'not_active'});
+        return send(200,{status:await engine.reset(raw.event_id)?'reset':'not_active'});
       }
       const event=validateEvent(raw);
+      if(engine.beforeAccept)await engine.beforeAccept(event);
+      else if(!config.dry_run&&!engine.state.active&&!browser.ready()&&browser.ensurePage) {
+        try {await browser.ensurePage();} catch { /* accept reports browser_not_ready */ }
+      }
       const result=engine.accept(event);return send(result.code,result.body);
     } catch(error) {
       return send(error instanceof Stop&&error.code==='task_still_running'?409:400,
@@ -94,7 +99,8 @@ export async function main(argv=process.argv.slice(2)) {
     if(existsSync(lock)) unlinkSync(lock);
     console.error(JSON.stringify({status:'startup_failed',reason:error instanceof Stop?error.code:'startup_error'}));
     process.exitCode=1;
-    if(browser.context) await browser.context.close().catch(()=>{});
+    if(browser.cdpBrowser) await browser.cdpBrowser.close().catch(()=>{});
+    else if(browser.context) await browser.context.close().catch(()=>{});
   }
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {

@@ -67,3 +67,10 @@ class BridgeTests(unittest.TestCase):
             bridge=self.bridge(path,notices.append);bridge.persist(OFFER,1000)
             with patch.object(bridge,'request') as req:bridge.tick(1200)
             req.assert_not_called();self.assertEqual(len(notices),1)
+    def test_held_event_keeps_watching_until_receiver_finishes(self):
+        with tempfile.TemporaryDirectory() as path:
+            bridge=self.bridge(path);eid=bridge.persist(OFFER,1000)
+            with patch.object(bridge,'request',return_value=(202,{'event_id':eid,'status':'held'})):bridge.tick(1000)
+            with bridge.connect() as c:self.assertEqual(c.execute('SELECT phase FROM events').fetchone()[0],'watching')
+            with patch.object(bridge,'request',return_value=(200,{'event_id':eid,'status':'awaiting_user'})):bridge.tick(1006)
+            with bridge.connect() as c:self.assertEqual(c.execute('SELECT phase,result FROM events').fetchone(),('done','awaiting_user'))

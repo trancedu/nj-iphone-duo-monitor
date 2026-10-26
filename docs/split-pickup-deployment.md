@@ -1,5 +1,9 @@
 # 分离式到货响应：Mac mini 监控，Mac 浏览器接手
 
+## 后续可选扩展
+
+接收 Mac 新增了用户授权的 `pickup_details` 模式：指定门店、第 2 个可用取货时段、进入 Pickup Details 并填本地联系人，最后仍停在 Continue with Apple Pay 前。默认不启用；详情见 [CDP 操作说明](chrome-cdp-shopping.md)。下文原有门店列表停止边界描述均指默认模式。
+
 ## 已实现与尚需验证
 
 Mac mini 继续原有库存检测和 Telegram；在 `monitor.notify_offer()` 确认到货的位置追加异步发送钩子，不改变库存判断。`pickup_bridge.py` 将事件持久化后发给 Mac；Mac 的独立 `mac_receiver/` 服务做浏览器准备。在检测线程中不等待 HTTP，不因 Mac 离线停库存监控。

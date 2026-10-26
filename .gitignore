@@ -5,6 +5,7 @@ runtime/
 *.log
 node_modules/
 mac_receiver/runtime/
+mac_receiver/runtime-*/
 mac_receiver/apple-browser-profile/
 *.local.json
 *.local.env
