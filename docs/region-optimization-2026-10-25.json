@@ -1,0 +1,163 @@
+{
+  "selection": "07078 + 11530",
+  "method": "Exhaustive comparison of locally captured candidate region pairs. Not a global optimum over all US ZIP codes. Require American Dream, all seven Manhattan stores, both Brooklyn stores, Queens Center. Maximize distinct watched NJ/NY stores, minimize overlap. Rank only the original 31 stores remaining after exclusion of four distant upstate stores.",
+  "overlap": [
+    "R032",
+    "R251"
+  ],
+  "watched": [
+    "R032",
+    "R043",
+    "R060",
+    "R067",
+    "R068",
+    "R095",
+    "R103",
+    "R104",
+    "R117",
+    "R152",
+    "R250",
+    "R251",
+    "R325",
+    "R327",
+    "R415",
+    "R582",
+    "R594",
+    "R612",
+    "R654",
+    "R715",
+    "R753",
+    "R755"
+  ],
+  "removed": [
+    "R013",
+    "R016",
+    "R017",
+    "R046",
+    "R061",
+    "R088",
+    "R107",
+    "R138",
+    "R139",
+    "R140",
+    "R206",
+    "R261",
+    "R549"
+  ],
+  "new_probe": {
+    "zip": "07054",
+    "result": "HTTP 541; no further probes attempted"
+  },
+  "pairs": [
+    {
+      "zips": [
+        "07677",
+        "10001"
+      ],
+      "overlap": 6,
+      "target_union": 18,
+      "total_union": 18,
+      "within_range_watched_union": 18
+    },
+    {
+      "zips": [
+        "12203",
+        "10001"
+      ],
+      "overlap": 0,
+      "target_union": 16,
+      "total_union": 24,
+      "within_range_watched_union": 15
+    },
+    {
+      "zips": [
+        "13290",
+        "10001"
+      ],
+      "overlap": 0,
+      "target_union": 22,
+      "total_union": 24,
+      "within_range_watched_union": 18
+    },
+    {
+      "zips": [
+        "07078",
+        "10001"
+      ],
+      "overlap": 5,
+      "target_union": 19,
+      "total_union": 19,
+      "within_range_watched_union": 19
+    },
+    {
+      "zips": [
+        "07078",
+        "11530"
+      ],
+      "overlap": 2,
+      "target_union": 22,
+      "total_union": 22,
+      "within_range_watched_union": 22
+    },
+    {
+      "zips": [
+        "10601",
+        "10001"
+      ],
+      "overlap": 4,
+      "target_union": 18,
+      "total_union": 20,
+      "within_range_watched_union": 18
+    },
+    {
+      "zips": [
+        "10001",
+        "11755"
+      ],
+      "overlap": 2,
+      "target_union": 18,
+      "total_union": 22,
+      "within_range_watched_union": 18
+    },
+    {
+      "zips": [
+        "10001",
+        "14564"
+      ],
+      "overlap": 0,
+      "target_union": 20,
+      "total_union": 24,
+      "within_range_watched_union": 16
+    },
+    {
+      "zips": [
+        "10001",
+        "11530"
+      ],
+      "overlap": 9,
+      "target_union": 15,
+      "total_union": 15,
+      "within_range_watched_union": 15
+    },
+    {
+      "zips": [
+        "10001",
+        "14225"
+      ],
+      "overlap": 0,
+      "target_union": 15,
+      "total_union": 24,
+      "within_range_watched_union": 12
+    },
+    {
+      "zips": [
+        "10001",
+        "08002"
+      ],
+      "overlap": 0,
+      "target_union": 18,
+      "total_union": 24,
+      "within_range_watched_union": 18
+    }
+  ]
+}

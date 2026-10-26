@@ -15,7 +15,9 @@ The repository was empty when cloned. The legacy `/shop/fulfillment-messages` AP
 
 The coverage investigation on 2026-10-24 verified all 35 NJ/NY store IDs using `/shop/retail/pickup-message`, with regional ZIP queries and `parts.0` / `parts.1` batching. Production now uses this endpoint. See [the investigation report](docs/coverage-investigation-2026-10-24.md).
 
-Five ZIPs (07078, 10001, 08002, 11755, 13290) cover all 35 watched stores in captured responses. Each cycle queries one rotating primary area and one rotating secondary area. The priority white 256GB model completes a full store sweep in three cycles: about 9–9.5 minutes normally, or 3–3.5 minutes in the morning window. Each individual store is checked when its region is queried; not all 35 stores are queried every minute. Random other variants have no fixed revisit interval.
+Production was optimized on 2026-10-25 to a fixed pair: **07078 (Short Hills) + 11530 (Garden City)**. Each captured response contains 12 stores; only SoHo and Upper West Side overlap, yielding **22 distinct watched stores every cycle**, including American Dream, all seven Manhattan stores, both Brooklyn stores and Queens Center. This is the best qualifying pair among the captured candidates, not a proven optimum over every ZIP. A new 07054 probe returned HTTP 541, so further probing stopped. See [pair comparison](docs/region-optimization-2026-10-25.json).
+
+White 256GB is now checked at every watched store each cycle: about 3–3.2 minutes normally, or 1–1.2 minutes in the morning window, absent errors. The second SKU is random and has no fixed revisit interval. Southern NJ, northern fringe stores, Smith Haven and the four distant upstate stores are outside this focused 22-store roster. `stores.json` retains the original 35-store directory as historical reference; production reads `config.json`.
 
 Wrong response location, missing expected stores and missing SKUs are errors, never out-of-stock results. `runtime/state.json` records per-cycle coverage and per-SKU/store observation times (`coverage_history`); `fresh_coverage_counts` uses a ten-minute freshness window. Official store directory: https://www.apple.com/retail/storelist/ .
 
@@ -33,7 +35,7 @@ python3 monitor.py
 
 Credentials: export `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, or pass `--env-file /path/to/private.env`. The deployed Mac reuses `/Users/codex/.codex/secrets/market-radar.env`. Secrets are never stored in the repository, raw logs, or Apple requests.
 
-`--smoke-test` checks the selected two Duo variants across every configured region, ten seconds apart, saves diagnostic JSON, never sends inventory alerts, and exits nonzero on failed regional queries or incomplete 35-store coverage. `--once` exits nonzero on failed inventory/notification processing. `--dry-run` never sends Telegram messages. Do not run diagnostic commands in tight loops.
+`--smoke-test` checks the selected two Duo variants across every configured region, ten seconds apart, saves diagnostic JSON, never sends inventory alerts, and exits nonzero on failed regional queries or incomplete configured-store coverage. `--once` exits nonzero on failed inventory/notification processing. `--dry-run` never sends Telegram messages. Do not run diagnostic commands in tight loops.
 
 `catalog.json` and `config.json` contain the discovered Duo SKUs and product links verified against Apple's current product page. Production config.json lists all eight variants but queries only two per cycle: fixed 256GB Star White plus one random other variant. Random selections are independent, so other variants have no guaranteed revisit interval; they average once per seven cycles. `--discover` refreshes catalog.json; update config.json deliberately after reviewing changes.
 

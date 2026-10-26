@@ -37,7 +37,7 @@ class RegionalTests(unittest.TestCase):
         missing_sku=copy.deepcopy(original);missing_sku['body']['stores'][0]['partsAvailability'].pop('MK1J4LL/A')
         for payload in [wrong,missing_store,missing_sku]:
             with self.assertRaises(m.QueryError):m.regional_payloads(payload,self.products,self.config['stores'],self.region,TODAY)
-    def test_all_35_stores_covered_in_three_two_request_cycles(self):
+    def test_fixed_pair_covers_all_22_stores_in_each_two_request_cycle(self):
         config=self.config
         class Fake:
             def __init__(self):self.calls=[]
@@ -47,12 +47,15 @@ class RegionalTests(unittest.TestCase):
                 return retail(config,products,region)
         client=Fake();state={}
         with tempfile.TemporaryDirectory() as path,patch.object(m.random,'choice',return_value='MK1J4LL/A'),patch.object(m.time,'sleep'):
-            for _ in range(3):m.run_cycle(client,config,state,Path(path),dry_run=True)
+            for _ in range(3):
+                m.run_cycle(client,config,state,Path(path),dry_run=True)
+                self.assertEqual(set(state['coverage']['MK1E4LL/A']['returned_stores']),set(config['stores']))
         self.assertEqual(len(client.calls),6)
         self.assertTrue(all(skus==['MK1E4LL/A','MK1J4LL/A'] for _,skus in client.calls))
         self.assertEqual(set(state['coverage_history']['MK1E4LL/A']),set(config['stores']))
-        self.assertEqual(state['fresh_coverage_counts']['MK1E4LL/A'],35)
-    def test_real_captured_responses_cover_all_35(self):
+        self.assertEqual(state['fresh_coverage_counts']['MK1E4LL/A'],22)
+        self.assertEqual([z for z,_ in client.calls],['07078','11530']*3)
+    def test_real_captured_responses_cover_all_22(self):
         # Captures are local commissioning evidence, never needed by CI.
         covered=set()
         for region in self.config['regions']:
