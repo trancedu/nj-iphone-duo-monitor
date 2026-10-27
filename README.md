@@ -12,6 +12,10 @@ The [bounded hybrid fallback](docs/hybrid-dataimpulse.md) can use DataImpulse on
 
 See the [2s / 1.5s / 1s DataImpulse cadence comparison](docs/dataimpulse-cadence-2026-10-27.md) for the finite isolated experiment and its response-time, gap and traffic tradeoffs.
 
+## Private dashboard
+
+The [read-only stock dashboard](docs/dashboard.md) shows live store/configuration status, availability history, disappearance evidence and request health. Open http://100.83.108.82:8890/iphone-duo-dashboard/ from the same Tailscale network. Its independent observer does not add Apple requests or change the monitor.
+
 ## Current stock monitoring
 
 Current Mac mini deployment (2026-10-27): **`dataimpulse_monitor.py` is the only live inventory source**, targeting US Rotating exits, ZIP **07094 (12 stores)** and all four 256GB/512GB color combinations. Target dispatch spacing is one second with at most four requests in flight. Telegram, LAN forwarding and stock deduplication are preserved. The old subscription-pool and hybrid trial modes are inactive. See [current DataImpulse-only deployment](docs/dataimpulse-live.md); older proxy/region schedules below are historical modes.

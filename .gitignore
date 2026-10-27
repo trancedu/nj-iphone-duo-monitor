@@ -9,3 +9,7 @@ mac_receiver/runtime-*/
 mac_receiver/apple-browser-profile/
 *.local.json
 *.local.env
+
+# Sanitized dashboard snapshots are generated locally, never versioned.
+dashboard/site/data.json
+dashboard/site/data.tmp
