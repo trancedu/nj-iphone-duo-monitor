@@ -1,6 +1,6 @@
 # 当前库存检测与 Safari 接手流程
 
-依据 2026-10-26 同步的仓库代码整理。接收 Mac 的安装目录是另一份运行部署；Mini 上 git pull 不会自动升级或重启它。当前生产主入口是 `proxy_monitor.py`，不是旧的 `monitor.py` 常驻循环。
+2026-10-27 更新：当前生产已切换到 [纯 DataImpulse 每秒入口](dataimpulse-live.md) `dataimpulse_monitor.py`，不再运行原订阅池。下文第 1 节保留旧代理池的调度说明；库存解析、Telegram、LAN HTTP 协议和 Safari 路由仍复用相同实现。接收 Mac 是独立部署，Mini 上 git pull 不会自动升级或重启它。
 
 ```mermaid
 sequenceDiagram

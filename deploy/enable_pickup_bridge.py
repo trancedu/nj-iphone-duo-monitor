@@ -26,7 +26,7 @@ if not target.is_file():raise SystemExit('Run as the monitor user with access to
 plist=Path.home()/'Library/LaunchAgents'/(a.label+'.plist')
 if not plist.is_file():raise SystemExit('Existing monitor LaunchAgent not found; select its actual --label, do not start a second monitor.')
 job=plistlib.loads(plist.read_bytes());argv=job.get('ProgramArguments',[])
-if str(repo/'proxy_monitor.py') not in argv or '--env-file' not in argv:raise SystemExit('LaunchAgent does not match the existing monitor; no changes made.')
+if not any(str(repo/name) in argv for name in ('proxy_monitor.py','dataimpulse_monitor.py')) or '--env-file' not in argv:raise SystemExit('LaunchAgent does not match the existing monitor; no changes made.')
 env=Path(argv[argv.index('--env-file')+1]);env_text=env.read_text()
 endpoint=meta['endpoint'];u=__import__('urllib.parse',fromlist=['urlsplit']).urlsplit(endpoint)
 if not ipaddress.ip_address(u.hostname).is_private or u.path!='/prepare':raise SystemExit('Invalid private receiver endpoint.')

@@ -14,7 +14,7 @@ See the [2s / 1.5s / 1s DataImpulse cadence comparison](docs/dataimpulse-cadence
 
 ## Current stock monitoring
 
-Current Mac deployment (2026-10-26): `proxy_monitor.py` queries ZIP **07094 (12 stores)** using all three cached subscriptions. Every request includes **all four 256GB/512GB color combinations**. Normal starts are paced two seconds apart. After 541/403/network failures, bounded recovery can immediately use another ready IP (at most 12 extra starts per rolling minute, 0.2-second minimum between primary starts). At most four requests are in flight, with a 60-second minimum per measured IP and persistent cooldowns. Successful refreshes can take longer than two seconds. The older non-proxy service below remains stopped.
+Current Mac mini deployment (2026-10-27): **`dataimpulse_monitor.py` is the only live inventory source**, targeting US Rotating exits, ZIP **07094 (12 stores)** and all four 256GB/512GB color combinations. Target dispatch spacing is one second with at most four requests in flight. Telegram, LAN forwarding and stock deduplication are preserved. The old subscription-pool and hybrid trial modes are inactive. See [current DataImpulse-only deployment](docs/dataimpulse-live.md); older proxy/region schedules below are historical modes.
 
 - Production alerts: iPhone Duo only, connect to a carrier later. Every request batches all four 256GB/512GB × Star White/Night Sky configurations; 1TB and 2TB are excluded.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.
