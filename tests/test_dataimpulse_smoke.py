@@ -1,4 +1,5 @@
 import json
+import http.client
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,15 @@ import proxy_monitor as p
 
 
 class DataImpulseTests(unittest.TestCase):
+    def test_incomplete_response_is_safe_network_error_and_counts_partial_bytes(self):
+        env={'DATAIMPULSE_PROXY_USERNAME':'dummy','DATAIMPULSE_PROXY_PASSWORD':'dummy',
+             'DATAIMPULSE_PROXY_HOST':'gw.dataimpulse.com','DATAIMPULSE_PROXY_PORT':'823'}
+        client=d.DataImpulseClient(env,'us')
+        with patch.object(m.Client,'get',side_effect=http.client.IncompleteRead(b'partial',100)):
+            with self.assertRaises(m.QueryError) as error:client.get('https://www.apple.com/')
+        self.assertEqual(error.exception.code,'network_error')
+        self.assertEqual(client.response_bytes,7)
+
     def test_country_override_preserves_other_parameters_and_escapes_credentials(self):
         env={'DATAIMPULSE_PROXY_USERNAME':'dummy__cr.gb;sessid.test',
              'DATAIMPULSE_PROXY_PASSWORD':'dummy:p@ss', 'DATAIMPULSE_PROXY_HOST':'gw.dataimpulse.com', 'DATAIMPULSE_PROXY_PORT':'823'}

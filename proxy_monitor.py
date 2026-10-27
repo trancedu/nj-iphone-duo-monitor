@@ -286,6 +286,15 @@ def run(args):
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     state.setdefault('sent', {})
     recovery = RecoveryPacer(state, getattr(args, 'max_recovery_per_minute', 12))
+    fallback, fallback_client, fallback_config = None, None, None
+    fallback_path = os.environ.get('DATAIMPULSE_FALLBACK_CONFIG')
+    if fallback_path:
+        try:
+            from dataimpulse_fallback import FreshnessHedge, load_settings
+            fallback_config, fallback_client = load_settings(fallback_path)
+            fallback = FreshnessHedge(fallback_config, state.setdefault('dataimpulse', {}), time.time())
+        except Exception:
+            m.LOG.error('dataimpulse_fallback_configuration_failed; primary polling continues')
     output = runtime / dt.datetime.now(m.TZ).strftime('%Y%m%d-%H%M%S')
     output.mkdir()
     report = {'pid': os.getpid(), 'preparation_at': dt.datetime.now(m.TZ).isoformat(),
@@ -298,6 +307,13 @@ def run(args):
               'monitored_products': [item['name'] for item in selected.values()],
               'telegram_configured': bool(os.environ.get('TELEGRAM_BOT_TOKEN') and os.environ.get('TELEGRAM_CHAT_ID')),
               'status': 'preparing', 'output': str(output)}
+    if fallback:
+        report['dataimpulse'] = {key: fallback_config.get(key) for key in
+            ('run_id', 'enabled_until_epoch', 'stale_after_seconds', 'max_per_minute', 'max_requests', 'max_body_mib',
+             'max_in_flight', 'parallel_after_seconds')}
+        report['dataimpulse'].update(transport=fallback_config.get('transport', 'urllib'),
+            total_timeout_seconds=fallback_config.get('total_timeout_seconds'))
+        report['counts_by_source'] = {'primary': {}, 'dataimpulse': {}}
 
     def save():
         m.atomic_json(state_path, state)
@@ -318,6 +334,8 @@ def run(args):
             started = time.monotonic()
             deadline = started + args.duration if args.duration else float('inf')
             report.update(started_at=dt.datetime.now(m.TZ).isoformat(), status='running')
+            if fallback:
+                fallback.success(time.time())
             next_start = started
             last_start = float('-inf')
             counts = collections.Counter()
@@ -326,16 +344,27 @@ def run(args):
             # state, cooldowns, notification deduplication, and request admission.
             pending = {}
             with concurrent.futures.ThreadPoolExecutor(max_workers=report['workers']) as executor, \
+                    concurrent.futures.ThreadPoolExecutor(max_workers=fallback_config.get('max_in_flight', 1) if fallback else 1) as fallback_executor, \
                     (output / 'queries.jsonl').open('a', buffering=1) as events:
                 while pending or (not stop and time.monotonic() < deadline):
                     for future in [f for f in pending if f.done()]:
                         row, event, products, request_start = pending.pop(future)
-                        record = state['exits'][row['ip']]
+                        is_fallback = row.get('source') == 'dataimpulse'
+                        record = {} if is_fallback else state['exits'][row['ip']]
+                        def finish_fallback(success, retry_after=0):
+                            body_bytes = row['client'].response_bytes-row['body_bytes_before']
+                            event['response_body_bytes'] = body_bytes
+                            fallback.finished(time.time(), success, body_bytes, retry_after)
                         try:
                             raw = future.result()
                             offers = parse_offers(raw, products, config, args.zip)
                             m.atomic_json(output / 'last-inventory.json', raw)
-                            record_result(state, row['ip'], time.time())
+                            if is_fallback:
+                                finish_fallback(True)
+                            else:
+                                record_result(state, row['ip'], time.time())
+                            if fallback:
+                                fallback.success(time.time())
                             event.update(result='http_200', stores=len(raw['body']['stores']), eligible_offers=len(offers))
                             report['last_success_at'] = dt.datetime.now(m.TZ).isoformat()
                             for offer in offers:
@@ -350,12 +379,29 @@ def run(args):
                                     report['notification_errors'] += 1
                         except m.QueryError as exc:
                             event.update(result=exc.code, retry_after=exc.retry_after)
-                            record_result(state, row['ip'], time.time(), exc, args.cooldown)
-                            recovery.failed(exc, row['ip'])
+                            if is_fallback:
+                                finish_fallback(False, exc.retry_after)
+                                if exc.code == 'http_429' or exc.retry_after:
+                                    state['global_blocked_until'] = max(state.get('global_blocked_until', 0),
+                                        time.time()+max(args.cooldown, exc.retry_after))
+                            else:
+                                record_result(state, row['ip'], time.time(), exc, args.cooldown)
+                                recovery.failed(exc, row['ip'])
+                        except Exception as exc:
+                            if not is_fallback:
+                                raise
+                            event.update(result='fallback_error', error_type=type(exc).__name__)
+                            finish_fallback(False)
                         event['completed_at'] = dt.datetime.now(m.TZ).isoformat()
                         event['elapsed_seconds'] = round(time.monotonic() - request_start, 3)
                         event['blocked_until'] = record.get('blocked_until', 0)
                         counts[event['result']] += 1
+                        if fallback:
+                            source = 'dataimpulse' if is_fallback else 'primary'
+                            source_counts = report['counts_by_source'][source]
+                            source_counts[event['result']] = source_counts.get(event['result'], 0)+1
+                            report['dataimpulse'].update(requests=state['dataimpulse']['requests'],
+                                response_body_bytes=state['dataimpulse']['body_bytes'])
                         report['counts'] = dict(counts)
                         report['queries'] = sum(counts.values())
                         report['elapsed_seconds'] = round(time.monotonic() - started, 3)
@@ -367,8 +413,31 @@ def run(args):
                             time.sleep(.02)
                         continue
                     active_ips = {entry[0]['ip'] for entry in pending.values()}
+                    if fallback:
+                        now = time.time()
+                        fallback_entries = [entry for entry in pending.values() if entry[0].get('source') == 'dataimpulse']
+                        reason = fallback.reason_not_ready(now,
+                            len(fallback_entries), state.get('global_blocked_until', 0),
+                            time.monotonic()-min(e[3] for e in fallback_entries) if fallback_entries else None)
+                        report['dataimpulse']['waiting_reason'] = reason
+                        if reason is None:
+                            fallback.dispatched(now)
+                            products = m.select_products(config)
+                            request_start = time.monotonic()
+                            event = {'at': dt.datetime.now(m.TZ).isoformat(), 'node': 'dataimpulse-us-fallback',
+                                'ip': None, 'source': 'dataimpulse', 'actual_exit_ip_verified': False,
+                                'start_seconds': round(request_start-started, 3), 'skus': list(products),
+                                'dispatch_reason': 'freshness_hedge',
+                                'stale_seconds_at_dispatch': round(now-fallback.last_success, 3)}
+                            row = {'node': event['node'], 'ip': None, 'source': 'dataimpulse',
+                                'client': fallback_client.clone() if hasattr(fallback_client, 'clone') else fallback_client}
+                            row['body_bytes_before'] = row['client'].response_bytes
+                            future = fallback_executor.submit(row['client'].inventory_region, products, args.zip)
+                            pending[future] = (row, event, products, request_start)
+                            save()
                     eligible = [row for row in pool if row['ip'] not in active_ips]
-                    if len(pending) >= report['workers'] or not eligible:
+                    primary_in_flight = sum(entry[0].get('source') != 'dataimpulse' for entry in pending.values())
+                    if primary_in_flight >= report['workers'] or not eligible:
                         time.sleep(.02)
                         continue
                     now = time.time()
@@ -401,6 +470,7 @@ def run(args):
                     products = m.select_products(config)
                     event = {'at': dt.datetime.now(m.TZ).isoformat(), 'node': row['node'], 'ip': row['ip'],
                              'start_seconds': round(request_start - started, 3), 'skus': list(products),
+                             'source': 'primary',
                              'dispatch_reason': 'failure_recovery' if early else 'scheduled'}
                     if cause:
                         event['recovery_from'] = cause

@@ -1,0 +1,14 @@
+{
+  "run_id": "replace-with-a-new-trial-id",
+  "env_file": "/absolute/path/to/private/dataimpulse.env",
+  "enabled_until_epoch": 0,
+  "stale_after_seconds": 1.2,
+  "parallel_after_seconds": 2.2,
+  "max_in_flight": 2,
+  "min_start_spacing_seconds": 0.2,
+  "max_per_minute": 30,
+  "max_requests": 200,
+  "max_body_mib": 20,
+  "transport": "curl",
+  "total_timeout_seconds": 2
+}

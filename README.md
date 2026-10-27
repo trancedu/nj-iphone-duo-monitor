@@ -8,9 +8,11 @@ See the [current end-to-end flow and Mini–Mac HTTP protocol](docs/current-pick
 
 The optional [DataImpulse smoke test](docs/dataimpulse-smoke.md) checks credentials, country targeting and one inventory response with bounded traffic. It does not enable DataImpulse production polling.
 
+The [bounded hybrid fallback](docs/hybrid-dataimpulse.md) can use DataImpulse only when successful inventory refreshes are stale. It shares existing notifications and has absolute expiry and paid-request/body budgets; it is disabled unless configured.
+
 ## Current stock monitoring
 
-Current Mac deployment (2026-10-26): `proxy_monitor.py` queries ZIP **07094 (12 stores)** using all three cached subscriptions. Every request includes **all four 256GB/512GB color combinations**. Normal starts are paced two seconds apart. After 541/403/network failures, bounded recovery can immediately use another ready IP (at most 12 extra starts per rolling minute, 0.2-second minimum between starts). At most four requests are in flight, with a 60-second minimum per measured IP and persistent cooldowns. Successful refreshes can take longer than two seconds. The older non-proxy service below remains stopped.
+Current Mac deployment (2026-10-26): `proxy_monitor.py` queries ZIP **07094 (12 stores)** using all three cached subscriptions. Every request includes **all four 256GB/512GB color combinations**. Normal starts are paced two seconds apart. After 541/403/network failures, bounded recovery can immediately use another ready IP (at most 12 extra starts per rolling minute, 0.2-second minimum between primary starts). At most four requests are in flight, with a 60-second minimum per measured IP and persistent cooldowns. Successful refreshes can take longer than two seconds. The older non-proxy service below remains stopped.
 
 - Production alerts: iPhone Duo only, connect to a carrier later. Every request batches all four 256GB/512GB × Star White/Night Sky configurations; 1TB and 2TB are excluded.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.

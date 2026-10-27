@@ -1,0 +1,61 @@
+# 原代理池 + DataImpulse 按需补位
+
+## 为什么要做 freshness hedge
+
+原池失败后换 IP 可以减少报错后的等待，但网络超时往往数秒后才返回。单独每两秒请求 DataImpulse 也会遇到慢响应、断流或 541，无法把最大成功刷新间隔限制在两秒。这里保留原池为主，只在有效库存响应持续空缺时启动有预算的付费备用请求。
+
+初始影子测试不修改生产，通过读取原进程的 current.json 观察成功刷新时间；正式接入后，两类完成响应在同一个 proxy_monitor 主线程里解析、记录和通知，不通过文件跨进程传递库存。
+
+## 正式调度
+
+- 原池仍常规每两秒发起，四 worker、每个已知 IP 至少间隔 60 秒、既有冷却和有限失败补发均保留。
+- DataImpulse 单独的 executor 最多两个 worker，不占原池四个名额。距任一来源上次成功刷新超过 1.2 秒时，可发送第一个 hedge。
+- 如果持续空缺超过 2.2 秒、且首个 hedge 至少在途一秒，可发第二个独立客户端/连接。第一或第二来源成功后重置 freshness；已在途请求照常完成，不以取消线程伪装为取消 HTTP。
+- DataImpulse 前两次失败可短间隔补发，连续失败三次起指数退避，最长 60 秒。付费源内部最小发起间隔默认 0.2 秒，并有独立滚动分钟额度。
+- 429 和 Retry-After 会让所有后续请求尊重全局等待。普通付费侧网络/解析错误不会终止原池或给它伪造一个 IP 冷却记录。
+- DataImpulse 每个并发请求独立传输客户端和流量计数。最终试运行使用 curl 两秒总时限；用户名/密码通过 stdin 的配置传递，不进入进程 argv，也不保存临时认证文件。TLS 验证保持开启，不自动重定向；记录 HTTP 状态并保留 Retry-After。网络超时会真正结束该次 curl 连接，而不是只让 Python future 超时后继续占用连接。urllib 传输仍保留作对比。IncompleteRead 被归类为网络错误，不使用残缺 JSON，并记录已读部分字节；不打印原始错误、认证 URL 或 Cookie。
+
+只有通过相同四 SKU、门店覆盖和日期验证的响应才算成功刷新。两种来源的 offer 都进入 monitor.notify_offer，复用同一 Telegram 去重状态、LAN outbox 与 event_id 机制。不会因为备用查询再次发现相同库存就额外建立一套订单通知通道。
+
+DataImpulse Rotating 每次连接可更换实际出口。本项目无法确认某一次 Apple 请求的出口 IP，日志明确使用 source=dataimpulse、ip=null、actual_exit_ip_verified=false；原池为 source=primary。不要把 null 当成一个真正 IP 汇总，更不能宣称付费池保证同 IP 60 秒间隔。该保证仍只适用于原已知出口池。
+
+## 费用与到期边界
+
+从 dataimpulse_fallback.example.json 复制私密配置，设置 DATAIMPULSE_FALLBACK_CONFIG 为配置绝对路径。配置不含代理密码，仅指向仓库外权限 600 的 env 文件。
+
+配置有独立 run_id、绝对 enabled_until_epoch、max_per_minute、总 max_requests、响应正文 max_body_mib。示例 expiry=0，复制后不会自动开始付费请求。加载时拒绝超过未来 30 分钟的到期时间，因此当前实现是**有限试运行**，不是无限持续消费。
+
+截止时间或任一总预算到达后，只停止新付费请求，原池继续运行；已在途最多两项仍会完成，所以字节预算可有少量超出。流量仅统计读到的响应正文，不包含所有错误响应和 TLS/proxy 开销，不等于供应商账单。付费额度、连续错误和次数保存在生产 state.json 的 dataimpulse 子项，重启同 run_id 不清零；换 run_id 明确代表新一轮预算。
+
+默认没有环境配置时，付费源完全不启用。主进程加载环境和设置后需重启才能应用；绝对 expiry 可以防止机器重启后再次产生无期限消费。一次限时试验结束不需要停掉原监控，也不应回滚其新到货记录和已发送消息状态。
+
+## 测试和诊断
+
+```sh
+# 不改变现有生产程序；三分钟影子试验，无 Telegram/浏览器通知
+python3 hybrid_shadow.py --config /absolute/path/to/trial.local.json --duration 180
+# 单独 DataImpulse 固定两秒，最多十分钟，无通知
+python3 dataimpulse_benchmark.py --duration 600 --spacing 2
+# 全部 Python 测试，库存和付费请求使用 mock；HTTP 集成只在回环 dry-run
+python3 -m unittest discover -s tests
+```
+
+代码：dataimpulse_client.py 是传输层，dataimpulse_fallback.py 是预算/新鲜度策略，proxy_monitor.py 是正式调度与通知整合，hybrid_shadow.py 是独立影子评估工具。
+
+生产 queries.jsonl 用 source 和 dispatch_reason=freshness_hedge 标出付费补位；stale_seconds_at_dispatch 是触发时的空缺长度。current.json 的 counts_by_source 分别统计原池和付费源，dataimpulse 展示累计次数、字节、到期和等待原因。last_success_at 和总 counts 为合并口径，分析原池时应筛 source=primary（旧记录未带 source 也视为原池）。
+
+## 已完成的实验
+
+2026-10-27 美东 03:40–03:50，单独 DataImpulse 两秒测试：299 次，277 成功，92.64%；1 次 541、18 网络错误、3 其他错误；平均成功 gap 2.173 秒、P95 4.319 秒、最大 6.870 秒，响应正文约 27.76 MB。不能把单次请求均值 1.364 秒误当刷新间隔。
+
+第一轮三分钟影子试验（两秒 stale、单补位、12/min）：同期原池最大 5.679 秒，合并最大 4.770 秒，平均 1.612 秒，P95 3.815 秒，付费正文约 2.91 MB。
+
+第二轮（1.5 秒 stale、单补位、18/min、前两次快速重试）：同期原池最大 8.350 秒，合并最大 5.346 秒，平均 1.474 秒，P95 3.150 秒，付费正文约 3.81 MB。最大 gap 对应一次 DataImpulse 自身耗时 6.269 秒，说明只允许一个备用在途仍有长尾阻塞，因此增加条件式第二 hedge。
+
+这些是相同时段的观察，不是对任意时刻、网络或供应商可用性的承诺。四秒是优化目标；两类来源同时失败、两项备用都慢、服务端要求等待或预算耗尽时，不能保证最大 gap 小于四秒。继续加并发/降阈值会增加请求与付费流量，并可能加重限流，因此不以无限加请求追求无法保证的硬时限。
+
+第三轮（1.5 秒 stale、双补位、24/min、urllib）：同期原池最大 6.928 秒，合并最大仍为 6.928 秒，平均 1.356 秒、P95 3.346 秒，付费正文约 5.31 MB。该次长 gap 中两条付费请求也分别耗时 4.183、5.745 秒；预算未用完，瓶颈是请求长尾。
+
+第四轮（1.5 秒 stale、双补位、30/min、curl 两秒总时限）：同期原池最大 7.520 秒，合并最大 4.071 秒，平均 1.283 秒、P95 3.030 秒；69 次付费查询中 61 成功、8 网络错误，付费正文约 6.20 MB。
+
+正式限时试运行把首 hedge 提前至 1.2 秒、第二阈值设为 2.2 秒，保留两秒总时限、最多两项付费在途、30/min、总 200 次/20 MiB。配置绝对到期为美东 2026-10-27 04:22:13；达到任何限制就只停付费源，原池继续。原池、Telegram 和 LAN 配置都保留，仅新增 DATAIMPULSE_FALLBACK_CONFIG 指针。71 项 Python 测试在部署前通过，含共同通知入口、付费错误不写假 IP 状态、不终止原池、真实总时限配置与私密 stdin 认证。
