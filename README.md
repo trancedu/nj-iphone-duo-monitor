@@ -4,7 +4,7 @@ Python 3.9+ standard-library monitor for Apple US store pickup.
 
 ## Split pickup response (Mac mini → Mac)
 
-The optional [split pickup deployment guide](docs/split-pickup-deployment.md) delivers authenticated LAN events without blocking inventory polling. The separate [Mac receiver](mac_receiver/README.md) prewarms a dedicated Chrome profile and stops at the pickup store list for manual handoff. Start in dry-run; live Apple Pay and page selectors must be verified on the receiving Mac. The bridge is disabled unless explicitly configured. Existing Telegram stock alerts remain enabled.
+See the [current end-to-end flow and Mini–Mac HTTP protocol](docs/current-pickup-flow.md) for polling, Telegram, authenticated LAN delivery, retries, status queries and deduplication. The production Mac receiver routes four products to independent Safari Profiles; its configured workflow prepares pickup details and stops before final Apple Pay authorization. The original [split deployment guide](docs/split-pickup-deployment.md) documents the initial Chrome/dry-run setup. LAN forwarding is opt-in; existing Telegram stock alerts remain independent.
 
 ## Current stock monitoring
 
