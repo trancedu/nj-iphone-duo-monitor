@@ -220,6 +220,41 @@ def parse_offers(raw, products, config, zipcode):
     return offers
 
 
+class RecoveryPacer:
+    """One coalesced failover credit, with a durable rolling-minute budget."""
+    def __init__(self, state, limit=12):
+        self.state, self.limit, self.pending = state, limit, None
+        state.setdefault('recovery_starts', [])
+
+    def failed(self, error, ip):
+        if error.code == 'http_429' or error.retry_after:
+            self.pending = None
+        elif error.code in ('http_541', 'http_403', 'network_error'):
+            self.pending = {'result': error.code, 'ip': ip}
+
+    def available(self, now):
+        starts = [t for t in self.state.get('recovery_starts', []) if t > now-60]
+        self.state['recovery_starts'] = starts
+        return bool(self.pending) and len(starts) < self.limit
+
+    def dispatched(self, now, early):
+        cause = self.pending if early else None
+        if early:
+            self.state['recovery_starts'].append(now)
+        self.pending = None
+        return cause
+
+
+def ready_recovery_exit(pool, state, now, minimum_interval):
+    """Prefer recently successful exits, without bypassing any IP/global wait."""
+    ready = [row for row in pool if ready_at(row['ip'], state, minimum_interval) <= now]
+    def rank(row):
+        record = state['exits'].get(row['ip'], {})
+        return (bool(record.get('consecutive_errors', 0)),
+                -record.get('last_success_at', 0), row.get('probe_seconds', float('inf')))
+    return min(ready, key=rank) if ready else None
+
+
 def run(args):
     runtime = m.ROOT / 'runtime' / 'proxy-monitor'
     runtime.mkdir(parents=True, exist_ok=True)
@@ -250,11 +285,14 @@ def run(args):
     state_path = runtime / 'state.json'
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     state.setdefault('sent', {})
+    recovery = RecoveryPacer(state, getattr(args, 'max_recovery_per_minute', 12))
     output = runtime / dt.datetime.now(m.TZ).strftime('%Y%m%d-%H%M%S')
     output.mkdir()
     report = {'pid': os.getpid(), 'preparation_at': dt.datetime.now(m.TZ).isoformat(),
               'duration_seconds': args.duration, 'target_start_spacing': args.spacing,
               'minimum_ip_interval': args.min_ip_interval, 'requested_max_nodes': args.max_nodes,
+              'max_recovery_per_minute': recovery.limit, 'recovery_min_start_spacing': .2,
+              'recovery_queries': 0,
               'zip': args.zip, 'counts': {}, 'alerts_sent': 0, 'notification_errors': 0,
               'monitored_skus': list(selected),
               'monitored_products': [item['name'] for item in selected.values()],
@@ -281,6 +319,7 @@ def run(args):
             deadline = started + args.duration if args.duration else float('inf')
             report.update(started_at=dt.datetime.now(m.TZ).isoformat(), status='running')
             next_start = started
+            last_start = float('-inf')
             counts = collections.Counter()
             save()
             # Workers only perform network I/O. The main thread owns all mutable
@@ -312,6 +351,7 @@ def run(args):
                         except m.QueryError as exc:
                             event.update(result=exc.code, retry_after=exc.retry_after)
                             record_result(state, row['ip'], time.time(), exc, args.cooldown)
+                            recovery.failed(exc, row['ip'])
                         event['completed_at'] = dt.datetime.now(m.TZ).isoformat()
                         event['elapsed_seconds'] = round(time.monotonic() - request_start, 3)
                         event['blocked_until'] = record.get('blocked_until', 0)
@@ -332,18 +372,39 @@ def run(args):
                         time.sleep(.02)
                         continue
                     now = time.time()
-                    row = next_ready(eligible, state, now, args.min_ip_interval)
+                    monotonic_now = time.monotonic()
+                    row = None
+                    # A failure can advance the next scheduled start; it never
+                    # creates parallel work on the failed IP or bypasses Retry-After.
+                    if monotonic_now < next_start and recovery.available(now):
+                        row = ready_recovery_exit(eligible, state, now, args.min_ip_interval)
+                    early = row is not None
+                    if row is None:
+                        row = next_ready(eligible, state, now, args.min_ip_interval)
+                    # Recovery is extra work, not a replacement that postpones
+                    # the ordinary two-second cadence after every error.
+                    due = max(last_start + min(.2, args.spacing),
+                              min(next_start, last_start + .2) if early else next_start)
                     wait = max(0, ready_at(row['ip'], state, args.min_ip_interval) - now,
-                               next_start - time.monotonic())
+                               due - time.monotonic())
                     if wait:
                         time.sleep(min(wait, .1, max(0, deadline - time.monotonic())))
                         continue
                     request_start = time.monotonic()
-                    state.setdefault('exits', {}).setdefault(row['ip'], {})['last_started_at'] = time.time()
-                    next_start = request_start + args.spacing
+                    wall_start = time.time()
+                    early = early and request_start < next_start
+                    cause = recovery.dispatched(wall_start, early)
+                    state.setdefault('exits', {}).setdefault(row['ip'], {})['last_started_at'] = wall_start
+                    last_start = request_start
+                    if not early:
+                        next_start = request_start + args.spacing
                     products = m.select_products(config)
                     event = {'at': dt.datetime.now(m.TZ).isoformat(), 'node': row['node'], 'ip': row['ip'],
-                             'start_seconds': round(request_start - started, 3), 'skus': list(products)}
+                             'start_seconds': round(request_start - started, 3), 'skus': list(products),
+                             'dispatch_reason': 'failure_recovery' if early else 'scheduled'}
+                    if cause:
+                        event['recovery_from'] = cause
+                        report['recovery_queries'] += 1
                     save()
                     row['client'].timeout = min(10, max(.1, deadline - time.monotonic()))
                     future = executor.submit(row['client'].inventory_region, products, args.zip)
@@ -370,6 +431,8 @@ def main():
     parser.add_argument('--workers', type=int, default=1, help='Bounded in-flight requests; starts still obey spacing')
     parser.add_argument('--all-subscriptions', action='store_true', help='Merge all locally cached remote profiles')
     parser.add_argument('--spacing', type=float, default=2)
+    parser.add_argument('--max-recovery-per-minute', type=int, default=12,
+                        help='Additional early starts after 541/403/network errors; 0 disables')
     parser.add_argument('--min-ip-interval', type=float, default=60)
     parser.add_argument('--cooldown', type=float, default=300)
     parser.add_argument('--zip', default='07094')
@@ -377,8 +440,8 @@ def main():
     parser.add_argument('--clash-config', type=Path, default=DEFAULT_CONFIG)
     parser.add_argument('--mihomo', default=DEFAULT_BINARY)
     args = parser.parse_args()
-    if args.duration < 0 or not 1 <= args.max_nodes <= 256 or not 1 <= args.workers <= 8 or args.spacing < 2 or args.min_ip_interval < 60 or args.cooldown < 300:
-        parser.error('Require duration >=0, nodes 1–256, workers 1–8, spacing >=2s, per-IP interval >=60s, cooldown >=300s')
+    if args.duration < 0 or not 1 <= args.max_nodes <= 256 or not 1 <= args.workers <= 8 or args.spacing < 2 or args.min_ip_interval < 60 or args.cooldown < 300 or not 0 <= args.max_recovery_per_minute <= 12:
+        parser.error('Require duration >=0, nodes 1–256, workers 1–8, spacing >=2s, per-IP interval >=60s, cooldown >=300s, recovery budget 0–12/min')
     try:
         run(args)
     except Exception as exc:

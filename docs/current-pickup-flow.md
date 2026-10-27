@@ -29,7 +29,7 @@ sequenceDiagram
 
 ## 1. Mini 如何查询
 
-`deploy/proxy_service.py` 启动同一个 `com.trancedu.iphone-duo-proxy-live` LaunchAgent：ZIP `07094`、四 worker、全局发起间隔至少 2 秒、同一测得出口 IP 发起间隔至少 60 秒。一次请求包含四个 SKU：
+`deploy/proxy_service.py` 启动同一个 `com.trancedu.iphone-duo-proxy-live` LaunchAgent：ZIP `07094`、四 worker、常规发起间隔 2 秒、同一测得出口 IP 发起间隔至少 60 秒。一次请求包含四个 SKU：
 
 | 配置 | SKU | Safari 路由 |
 |---|---|---|
@@ -53,6 +53,10 @@ GET https://www.apple.com/shop/retail/pickup-message
 这是一个请求，不是每店一个请求，也不是每款一个请求。响应的 `body.stores[]` 含门店，每店的 `partsAvailability[SKU]` 含该配置的 `pickupDisplay`、可选标志和日期/文案。默认 07094 路径要求预期的 12 家店齐全；配置中的旧两 ZIP / 22 店区域表不等于这个生产进程在查询两 ZIP。
 
 启动时从三个本机缓存订阅中读取节点，用独立 Mihomo 运行环境连接节点，探测并按出口 IP 去重。节点数不等于出口 IP 数，出口数也不等于当前健康数。出错出口进入持久冷却，调度器只在冷却和 60 秒限制都到期后复用。403/429/541 默认按连续错误退避 5、10、20、40、60 分钟；网络错误从 60 秒开始退避。429 或显式 Retry-After 还会触发全局等待。
+
+541、403 或网络错误返回后，调度器可立即换一个已就绪的出口补发，不必等下一次常规查询。优先选择最近成功且无连续错误的出口；同批错误合并为一个待补发额度，最多每滚动分钟 12 次额外请求，所有发起至少间隔 0.2 秒。补发不推迟原有常规节奏，不增加四 worker 上限，不绕过同 IP 的 60 秒间隔或冷却。429 与 Retry-After 不授予快速补发，继续尊重全局退避。额度用完或没有就绪 IP 就等待正常调度。额度时间戳持久化在 state.json，重启不刷新额度；--max-recovery-per-minute 0 可关闭快速补发。
+
+查询日志的 dispatch_reason 标记 scheduled 或 failure_recovery，后者含 recovery_from；报告的 recovery_queries 统计本次进程补发次数，target_start_spacing 表示常规节奏。
 
 2 秒是请求发起目标，不是成功刷新保证；四 worker 允许慢请求重叠。真实刷新要看成功响应完成时间差。代理出口只供库存查询，Telegram 和到 Mac 的 LAN 请求使用独立直连传输。
 

@@ -14,6 +14,70 @@ import proxy_monitor as p
 
 
 class ProxyMonitorTests(unittest.TestCase):
+    def test_recovery_budget_coalesces_errors_and_survives_restart(self):
+        state = {};recovery = p.RecoveryPacer(state, 2)
+        for now in [100, 101]:
+            recovery.failed(m.QueryError('http_541'), 'bad')
+            recovery.failed(m.QueryError('network_error'), 'other')
+            self.assertTrue(recovery.available(now))
+            self.assertEqual(recovery.dispatched(now, True)['ip'], 'other')
+            self.assertFalse(recovery.pending)
+        restored = p.RecoveryPacer(json.loads(json.dumps(state)), 2)
+        restored.failed(m.QueryError('http_541'), 'bad')
+        self.assertFalse(restored.available(159))
+        self.assertTrue(restored.available(160))
+
+    def test_recovery_disabled_or_global_backoff_never_grants_credit(self):
+        disabled = p.RecoveryPacer({}, 0)
+        disabled.failed(m.QueryError('http_541'), 'bad')
+        self.assertFalse(disabled.available(100))
+        recovery = p.RecoveryPacer({})
+        for error in [m.QueryError('http_429'), m.QueryError('http_541', 300)]:
+            recovery.failed(m.QueryError('network_error'), 'bad')
+            recovery.failed(error, 'blocked')
+            self.assertFalse(recovery.available(100))
+        recovery.failed(m.QueryError('invalid_regional_store_schema'), 'schema')
+        self.assertFalse(recovery.available(100))
+
+    def test_recovery_uses_only_ready_ips_and_prefers_successful_exit(self):
+        pool = [{'ip': ip, 'probe_seconds': .1} for ip in ['cooling', 'recent', 'healthy', 'unknown']]
+        state = {'exits': {'cooling': {'blocked_until': 200}, 'recent': {'last_started_at': 95},
+                          'healthy': {'last_success_at': 30, 'last_started_at': 30}}}
+        self.assertEqual(p.ready_recovery_exit(pool, state, 100, 60)['ip'], 'healthy')
+        state['global_blocked_until'] = 101
+        self.assertIsNone(p.ready_recovery_exit(pool, state, 100, 60))
+
+    def test_failed_request_replaced_before_normal_spacing_without_reusing_ip(self):
+        config = json.loads((m.ROOT / 'config.json').read_text());calls=[]
+        class FakeClient:
+            def __init__(self, ip):self.ip=ip
+            def inventory_region(self, products, zipcode):
+                calls.append((self.ip, time.monotonic()))
+                raise m.QueryError('http_541')
+        pool = [{'node': str(i), 'ip': str(i), 'probe_seconds': .1, 'client': FakeClient(str(i))} for i in range(5)]
+        @contextmanager
+        def private(*args):yield pool
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'config.json').write_text(json.dumps(config))
+            args=argparse.Namespace(duration=2.4,max_nodes=60,workers=1,spacing=2,
+                max_recovery_per_minute=1,min_ip_interval=60,cooldown=300,zip='07094',
+                env_file=root/'missing.env',clash_config=root/'config.yaml',mihomo='unused')
+            with patch.object(m,'ROOT',root),patch.object(p,'private_proxy',private), \
+                 patch.object(p,'discover_pool',return_value=pool),patch.object(p.signal,'signal'), \
+                 patch.dict(p.os.environ,{},clear=True),patch('builtins.print'):
+                p.run(args)
+            report=json.loads((root/'runtime/proxy-monitor/current.json').read_text())
+            events=[json.loads(l) for l in (Path(report['output'])/'queries.jsonl').read_text().splitlines()]
+        self.assertEqual(len(calls),3)
+        self.assertNotEqual(calls[0][0],calls[1][0])
+        self.assertGreaterEqual(calls[1][1]-calls[0][1],.199)
+        self.assertLess(calls[1][1]-calls[0][1],1)
+        self.assertLess(calls[2][1]-calls[0][1],2.15)
+        self.assertEqual(report['recovery_queries'],1)
+        self.assertEqual(events[1]['dispatch_reason'],'failure_recovery')
+        self.assertEqual(events[1]['recovery_from']['result'],'http_541')
+        self.assertEqual(events[2]['dispatch_reason'],'scheduled')
+
     def test_environment_zip_from_env_file_reaches_actual_proxy_request(self):
         config = json.loads((m.ROOT / 'config.json').read_text())
         calls = []

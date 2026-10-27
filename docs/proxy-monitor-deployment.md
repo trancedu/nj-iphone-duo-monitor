@@ -167,3 +167,7 @@ python3 deploy/proxy_service.py stop-live
 
 此 LaunchAgent 服务不依赖 Codex 应用保持运行，但需要电脑开机、用户已登录、订阅及网络可用。
 如果 Telegram 凭证仍缺失，必须明确报告提醒功能尚不可用，不得声称通知已经配置成功。
+
+## Bounded failure recovery
+
+Normal queries retain the two-second cadence. A 541, 403 or network failure can dispatch an extra request through another ready exit without waiting for that cadence. The default is at most 12 early starts per rolling minute, with 0.2 seconds between any starts and the existing four-worker limit. Recovery prefers recently successful exits; per-IP 60-second spacing, cooldowns, global 429/Retry-After backoff and Telegram/LAN delivery stay intact. The recovery budget is persisted. Set `--max-recovery-per-minute 0` to disable; accepted values are 0–12. Look for `dispatch_reason: failure_recovery`, `recovery_from` and report `recovery_queries` when evaluating the change. A two-second maximum successful-response gap remains unachievable when requests fail or take longer.
