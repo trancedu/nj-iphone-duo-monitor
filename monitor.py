@@ -248,7 +248,15 @@ def notify_offer(offer,config,state,runtime,dry_run,opened):
         opened.add(offer['sku'])
         open_product_page(offer['url'])
 
+def environment_region():
+    zipcode=os.environ.get('APPLE_PICKUP_ZIP')
+    if zipcode is None: return None
+    if not re.fullmatch(r'[0-9]{5}',zipcode): raise QueryError('invalid_pickup_zip')
+    return {'name':'environment-zip','zip':zipcode,'dynamic':True}
+
 def select_regions(config, state):
+    override=environment_region()
+    if override: return [override]
     chosen=[]
     for tier in ('primary','secondary'):
         group=[r for r in config['regions'] if r['tier']==tier]
@@ -308,17 +316,10 @@ def run_cycle(client, config, state, runtime, dry_run=False):
     errors = []
     coverage = {}
     opened = set()
-    if config.get('regions'):
+    if config.get('regions') or os.environ.get('APPLE_PICKUP_ZIP') is not None:
         regions=select_regions(config,state)
         batches=[(region['zip'],products,region) for region in regions]
-        extra_zip=os.environ.get('APPLE_PICKUP_ZIP','').strip()
-        if extra_zip:
-            if not re.fullmatch(r'\d{5}',extra_zip): raise QueryError('invalid_pickup_zip')
-            if extra_zip not in {region['zip'] for region in regions}:
-                extra={'name':'environment-zip','zip':extra_zip,'tier':'optional','dynamic':True}
-                batches.append((extra_zip,products,extra))
         state['regions_checked']=[r['zip'] for r in regions]
-        if len(batches)>len(regions): state['regions_checked'].append(extra_zip)
         state['endpoint']='/shop/retail/pickup-message'
     else:
         batches=[(sku,{sku:product},None) for sku,product in products.items()]
@@ -360,16 +361,9 @@ def run_cycle(client, config, state, runtime, dry_run=False):
                 state.setdefault('coverage_by_region',{})[region['zip']]={
                     'checked_at':time.time(),'skus':list(batch_products),
                     'returned_stores':sorted(observed_ids)}
-                if region.get('dynamic'):
-                    state.setdefault('optional_region_status',{})[region['zip']]={'checked_at':time.time(),'status':'healthy'}
         except QueryError as exc:
             # Notification failures are retried by the outer handler; do not mark as sold out.
             if exc.code.startswith('telegram_'): raise
-            if region and region.get('dynamic'):
-                state.setdefault('optional_region_status',{})[region['zip']]={
-                    'checked_at':time.time(),'status':'degraded','error':exc.code}
-                LOG.warning('optional ZIP query failed (%s): %s',region['zip'],exc.code)
-                continue
             errors.append(exc)
             break
     state['fresh_coverage_counts']={sku:sum(time.time()-entry['checked_at'] <= 600 for entry in stores.values())
@@ -423,22 +417,25 @@ def main():
         parser.error('minimum peak interval 20s')
     if args.smoke_test:
         # Diagnostics never call Telegram and never enter production alert state.
-        if config.get('regions'):
+        override=environment_region()
+        if config.get('regions') or override:
             result={};covered=set();products=select_products(config)
-            for index,region in enumerate(config['regions']):
+            for index,region in enumerate([override] if override else config['regions']):
                 if index: time.sleep(10)
                 try:
                     raw=client.inventory_region(products,region['zip'])
-                    payloads=regional_payloads(raw,products,config['stores'],region,dt.datetime.now(TZ).date())
+                    watched=None if region.get('dynamic') else config['stores']
+                    payloads=regional_payloads(raw,products,watched,region,dt.datetime.now(TZ).date())
                     observed=set()
                     for sku,payload in payloads.items():
-                        parse_inventory(payload,{sku:products[sku]},dt.datetime.now(TZ).date(),requested_stores=config['stores'])
+                        parse_inventory(payload,{sku:products[sku]},dt.datetime.now(TZ).date(),requested_stores=watched,allowed_states=None if region.get('dynamic') else ('NJ','NY'))
                         observed.update(row['storeId'] for row in payload['body']['content'])
                     covered.update(observed)
                     result[region['zip']]={'ok':True,'stores':sorted(observed)}
                 except QueryError as exc:
                     result[region['zip']]={'ok':False,'error':exc.code};break
-            result['coverage']={'ok':covered>=set(config['stores']),'count':len(covered),'missing':sorted(set(config['stores'])-covered)}
+            expected=covered if override else set(config['stores'])
+            result['coverage']={'ok':bool(covered) and covered>=expected,'count':len(covered),'missing':sorted(expected-covered)}
             atomic_json(runtime/'smoke-result.json',result)
             print(json.dumps(result,indent=2));return int(not all(v['ok'] for v in result.values()))
         result = {}

@@ -67,4 +67,29 @@ class RegionalTests(unittest.TestCase):
             covered.update(r['storeId'] for r in normalized['MK1E4LL/A']['body']['content'])
         self.assertEqual(covered,set(self.config['stores']))
 
+    def test_environment_zip_replaces_all_configured_regions(self):
+        calls=[]
+        class Fake:
+            def inventory_region(inner,products,zipcode):
+                calls.append(zipcode)
+                return {'body':{'location':zipcode,'stores':[{
+                    'storeNumber':'R-CA','storeName':'Test California','state':'CA',
+                    'partsAvailability':{sku:{'pickupDisplay':'unavailable',
+                        'pickupSearchQuote':'Currently unavailable',
+                        'messageTypes':{'regular':{'storeSelectionEnabled':False,
+                            'storePickupQuote':'Currently unavailable'}}} for sku in products}}]}}
+        state={}
+        with tempfile.TemporaryDirectory() as path,patch.dict(m.os.environ,{'APPLE_PICKUP_ZIP':'94596'}),patch.object(m.time,'sleep') as sleep:
+            m.run_cycle(Fake(),self.config,state,Path(path),dry_run=True)
+            sleep.assert_not_called()
+        self.assertEqual(calls,['94596'])
+        self.assertEqual(state['regions_checked'],['94596'])
+        self.assertEqual(state['status'],'healthy')
+        self.assertEqual(state['coverage']['MK1E4LL/A']['states'],['CA'])
+
+    def test_invalid_environment_zip_fails_before_querying(self):
+        with patch.dict(m.os.environ,{'APPLE_PICKUP_ZIP':'9459'}):
+            with self.assertRaisesRegex(m.QueryError,'invalid_pickup_zip'):
+                m.select_regions(self.config,{})
+
 if __name__=='__main__':unittest.main()

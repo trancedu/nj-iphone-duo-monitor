@@ -133,7 +133,7 @@ export class PickupBrowser {
   }
   async prepare(event,stage) {
     const originalZip=this.config.pickup_zip;
-    if(event.pickup_zip)this.config.pickup_zip=event.pickup_zip;
+    this.config.pickup_zip=process.env.APPLE_PICKUP_ZIP??event.pickup_zip??originalZip;
     try{return await preparePickup(this,event,stage);}
     finally{this.config.pickup_zip=originalZip;}
   }

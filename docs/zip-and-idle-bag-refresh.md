@@ -5,24 +5,21 @@
 The shared optional environment variable is `APPLE_PICKUP_ZIP`. It must contain
 exactly five digits. Leaving it unset preserves the checked-in defaults.
 
-On Mac Mini, setting it adds one regional inventory query to every normal cycle;
-the configured New Jersey and New York regions continue to run. The optional
-ZIP's store roster is read from Apple's response and validated for unique store
-IDs, state codes, all configured SKUs, and pickup fields. It does not replace
-either existing region. The inventory event carries the ZIP that produced it,
-so the Mac receiver searches the same area during pickup preparation.
+On Mac Mini, setting it replaces every configured regional query with a single
+query for that ZIP. The previous regions are not queried while the variable is
+set. The ZIP's store roster is read from Apple's response and validated for
+unique store IDs, state codes, all configured SKUs, and pickup fields. The
+inventory event carries the ZIP that produced it.
 
-On the Mac receiver, the same variable overrides its fallback pickup ZIP. An
-event's own `pickup_zip` takes precedence, so a New York event continues to use
-the ZIP of its monitored region even if a separate fallback is configured.
-Standalone browser scripts use the environment variable as their ZIP override.
+On the Mac receiver, the same variable overrides the event ZIP and configured
+fallback ZIP. When unset, the event ZIP takes precedence over the JSON fallback.
+Standalone browser scripts also support this environment variable.
 
 For a future California trial, add `APPLE_PICKUP_ZIP=94596` to the existing
-Mini monitor environment file and restart that monitor. This is additive: the
-regular New Jersey/New York checks remain enabled. It adds one Apple inventory
-request per cycle, with the existing request gap. To return to the present
-coverage, remove the variable and restart the monitor. This checkout does not
-change the live environment or the configured New York-area regions.
+environment files on Mini and Mac, then restart both services. This switches all
+monitoring and pickup preparation to that ZIP. To return to the present defaults,
+remove the variable and restart both services. The variable has not been set in
+the live environment, so the current New York-area configuration is unchanged.
 
 The current monitor configuration contains two ZIPs, `07078` and `11530`.
 The receiver's fallback pickup ZIP remains `07094`. New monitor events carry
