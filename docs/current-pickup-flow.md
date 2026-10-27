@@ -234,3 +234,8 @@ Safari 后端不是通过 Playwright 控制 Safari。它通过 macOS Apple Event
 这不代表要立即切换地区。当前没有设置覆盖变量，原 07094 / 12 店和四 SKU 保留。Python 进程启动时已导入的模块不会因 git pull 自动刷新；此次代码同步没有重启监控，因此接线修正从下一次正常重启生效。Mac 的独立安装 bundle 也不会因 Mini 同步而变化。
 
 查看运行状态和耗时使用 runtime/proxy-monitor/current.json、queries.jsonl、availability-events.jsonl、pickup-bridge/delivery.jsonl，以及 Mac /status/<event_id>。日志阶段时间可以算检测→接收→购物袋验证→自提页→最终交接；跨机器计时需时钟同步。模拟信号只验证事件和流程，不能证明当时真实有库存。
+
+
+## Mac mini local speech (2026-10-27)
+
+An additional independent [local stock voice service](local-stock-audio.md) tails confirmed availability events and speaks short configuration names through Mac mini Speakers. It uses a bounded queue and dedicated worker thread, with store/SKU/date deduplication and brief same-phrase coalescing. It neither changes this HTTP protocol nor blocks polling, Telegram or Mac delivery, and makes no additional inventory requests.

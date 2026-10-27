@@ -22,6 +22,10 @@ The [bounded hybrid fallback](docs/hybrid-dataimpulse.md) can use DataImpulse on
 
 See the [2s / 1.5s / 1s DataImpulse cadence comparison](docs/dataimpulse-cadence-2026-10-27.md) for the finite isolated experiment and its response-time, gap and traffic tradeoffs.
 
+## Mac mini voice alerts
+
+The [independent local speaker](docs/local-stock-audio.md) announces fresh arrivals as “二五六黑” / “五一二白” through Mac mini Speakers. A background worker coalesces repeats without blocking inventory polling or changing Telegram/Mac forwarding.
+
 ## Private dashboard
 
 The [read-only stock dashboard](docs/dashboard.md) shows live store/configuration status, availability history, disappearance evidence and request health. Open http://100.83.108.82:8890/iphone-duo-dashboard/ from the same Tailscale network. Its independent observer does not add Apple requests or change the monitor.
