@@ -21,17 +21,35 @@ def summarize(rows):
     gaps = [b-a for a,b in zip(good,good[1:])]
     durations = sorted(r['elapsed_seconds'] for r in rows)
     starts = sorted(r['started_epoch'] for r in rows)
+    successful_durations=[r['elapsed_seconds'] for r in rows if r['result']=='http_200']
+    error_durations=[r['elapsed_seconds'] for r in rows if r['result']!='http_200']
     def percentile(values,p): return round(sorted(values)[int((len(values)-1)*p)],3) if values else None
     return {'queries':len(rows),'counts':dict(counts),
         'success_percent':round(counts['http_200']/len(rows)*100,2) if rows else None,
         'mean_start_gap_seconds':round((starts[-1]-starts[0])/(len(starts)-1),3) if len(starts)>1 else None,
         'mean_request_seconds':round(statistics.mean(durations),3) if durations else None,
         'p95_request_seconds':percentile(durations,.95),
+        'mean_success_response_seconds':round(statistics.mean(successful_durations),3) if successful_durations else None,
+        'p95_success_response_seconds':percentile(successful_durations,.95),
+        'mean_error_response_seconds':round(statistics.mean(error_durations),3) if error_durations else None,
         'mean_success_gap_seconds':round(statistics.mean(gaps),3) if gaps else None,
         'p95_success_gap_seconds':percentile(gaps,.95),
         'max_success_gap_seconds':round(max(gaps),3) if gaps else None,
         'response_body_bytes':sum(r['response_body_bytes'] for r in rows),
         'positive_queries':sum(r.get('eligible_offers',0)>0 for r in rows)}
+
+
+def active_window_summary(rows,started_at,duration):
+    """Exclude stopped-dispatch drain gaps, but expose any censored final gap."""
+    end=dt.datetime.fromisoformat(started_at).timestamp()+duration
+    active=[r for r in rows if r['completed_epoch']<=end]
+    summary=summarize(active)
+    successes=[r['completed_epoch'] for r in active if r['result']=='http_200']
+    tail=max(0,end-max(successes)) if successes else duration
+    summary['end_without_new_success_seconds']=round(tail,3)
+    summary['max_observed_gap_seconds']=round(max(summary['max_success_gap_seconds'] or 0,tail),3)
+    summary['drained_after_window']=len(rows)-len(active)
+    return summary
 
 
 def query(environ,config,country,zipcode,client_factory=DataImpulseClient):
@@ -59,6 +77,7 @@ def benchmark(environ,config,output,duration=600,spacing=2,workers=4,max_bytes=5
     report={'started_at':dt.datetime.now(dt.timezone.utc).isoformat(),'duration_seconds':duration,
         'target_spacing_seconds':spacing,'max_requests':max_requests,'workers':workers,'zip':'07094',
         'country':'us','notifications_enabled':False,'production_changed':False,'max_response_body_bytes':max_bytes,
+        'transport':'urllib','socket_timeout_seconds':12,
         'actual_exit_ip_verified':False,'note':'Rotating: each connection may use a different exit. Same-IP 60s spacing cannot be verified. Body bytes exclude billing overhead.'}
     def save(status):
         report.update(status=status,elapsed_seconds=round(time.monotonic()-start,3),submitted=submitted,
@@ -82,8 +101,35 @@ def benchmark(environ,config,output,duration=600,spacing=2,workers=4,max_bytes=5
                 pending[future]=submitted;next_start=time.monotonic()+spacing;save('running')
             # No catch-up burst when workers are occupied; drain existing requests at the end.
             time.sleep(.02)
+    report['active_window_summary']=active_window_summary(rows,report['started_at'],duration)
     report['finished_at']=dt.datetime.now(dt.timezone.utc).isoformat();save('completed')
     return report
+
+
+def run_series(environ,config,output,duration=300,runner=benchmark):
+    """Sequential equal-duration cadence comparison; no overlapping tiers."""
+    output.mkdir(parents=True,exist_ok=False,mode=0o700)
+    series={'started_at':dt.datetime.now(dt.timezone.utc).isoformat(),'status':'running',
+        'duration_per_tier_seconds':duration,'spacings':[2,1.5,1],'tiers':[],
+        'max_total_body_bytes':75*1024*1024,'production_changed':False,'notifications_enabled':False}
+    total=0
+    for spacing in series['spacings']:
+        series['current_spacing']=spacing;m.atomic_json(output/'comparison.json',series)
+        remaining=series['max_total_body_bytes']-total
+        if remaining<=0:
+            series['stop_reason']='series_body_budget';break
+        report=runner(environ,config,output/('spacing-'+str(spacing).replace('.','_')),
+            duration=duration,spacing=spacing,workers=4,max_bytes=min(50*1024*1024,remaining))
+        series['tiers'].append(report);total+=report['response_body_bytes']
+        series['response_body_bytes']=total;m.atomic_json(output/'comparison.json',series)
+        print('Tier completed:',json.dumps({'spacing':spacing,'queries':report.get('queries'),
+            'counts':report.get('counts'),'mean_success_gap_seconds':report.get('mean_success_gap_seconds'),
+            'max_success_gap_seconds':report.get('max_success_gap_seconds')}),flush=True)
+        if report.get('stop_reason'):
+            series['stop_reason']=report['stop_reason'];break
+    series.update(status='completed',finished_at=dt.datetime.now(dt.timezone.utc).isoformat())
+    series.pop('current_spacing',None);m.atomic_json(output/'comparison.json',series)
+    return series
 
 
 def main():
@@ -91,13 +137,19 @@ def main():
     p.add_argument('--env-file',type=Path,default=Path.home()/'.codex/secrets/dataimpulse.env')
     p.add_argument('--duration',type=int,default=600)
     p.add_argument('--spacing',type=float,default=2)
+    p.add_argument('--series',action='store_true',help='Compare 2s, 1.5s and 1s sequentially; duration <=300 per tier')
     args=p.parse_args()
-    if not 2<=args.duration<=600 or args.spacing<2:p.error('duration 2–600 seconds, spacing >=2 seconds')
+    if not 2<=args.duration<=600 or args.spacing<1 or args.series and args.duration>300:
+        p.error('duration 2–600 seconds, spacing >=1 second; series duration <=300 seconds per tier')
     try:
         m.load_env(args.env_file);environ=dict(os.environ);DataImpulseClient(environ,'us')
         config=json.loads((m.ROOT/'config.json').read_text())
-        output=m.ROOT/'runtime/dataimpulse-benchmark'/dt.datetime.now(m.TZ).strftime('%Y%m%d-%H%M%S')
+        output=m.ROOT/('runtime/dataimpulse-cadence' if args.series else 'runtime/dataimpulse-benchmark')/dt.datetime.now(m.TZ).strftime('%Y%m%d-%H%M%S')
         print('Isolated benchmark output:',output,flush=True)
+        if args.series:
+            report=run_series(environ,config,output,args.duration)
+            print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)
+            return int(bool(report.get('stop_reason')))
         report=benchmark(environ,config,output,args.duration,args.spacing)
         print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)
         return 0 if report['counts'].get('http_200') else 1

@@ -10,6 +10,8 @@ The optional [DataImpulse smoke test](docs/dataimpulse-smoke.md) checks credenti
 
 The [bounded hybrid fallback](docs/hybrid-dataimpulse.md) can use DataImpulse only when successful inventory refreshes are stale. It shares existing notifications and has absolute expiry and paid-request/body budgets; it is disabled unless configured.
 
+See the [2s / 1.5s / 1s DataImpulse cadence comparison](docs/dataimpulse-cadence-2026-10-27.md) for the finite isolated experiment and its response-time, gap and traffic tradeoffs.
+
 ## Current stock monitoring
 
 Current Mac deployment (2026-10-26): `proxy_monitor.py` queries ZIP **07094 (12 stores)** using all three cached subscriptions. Every request includes **all four 256GB/512GB color combinations**. Normal starts are paced two seconds apart. After 541/403/network failures, bounded recovery can immediately use another ready IP (at most 12 extra starts per rolling minute, 0.2-second minimum between primary starts). At most four requests are in flight, with a 60-second minimum per measured IP and persistent cooldowns. Successful refreshes can take longer than two seconds. The older non-proxy service below remains stopped.
