@@ -1,7 +1,7 @@
 {
   "safari_test_state_dir": "runtime-safari",
   "pickup_zip": "07094",
-  "pickup_unavailable_retries": 5,
+  "pickup_unavailable_retries": 10,
   "pickup_retry_interval_ms": 1000,
   "test_any_available_store": true,
   "pickup_details": {
@@ -12,5 +12,6 @@
     "last_name": "User",
     "email": "test@example.com",
     "phone": "2025550123"
-  }
+  },
+  "handoff_idle_timeout_seconds": 600
 }

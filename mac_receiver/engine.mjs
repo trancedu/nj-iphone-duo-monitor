@@ -1,6 +1,7 @@
 import {mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, appendFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {fingerprint, Stop} from './protocol.mjs';
+import {sanitizeObservation,appendDiagnostic} from './safari/diagnostics.mjs';
 const now = () => new Date().toISOString();
 
 export class Engine {
@@ -26,12 +27,12 @@ export class Engine {
   }
   log(item,stage) {
     appendFileSync(join(this.config.state_dir,'events.jsonl'),JSON.stringify({at:now(),event_id:item.event_id,
-      status:item.status,stage,timestamps:item.timestamps})+'\n',{mode:0o600});
+      status:item.status,reason:item.reason,idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at,release_reason:item.release_reason,product_url:item.product_url,store_id:item.store_id,store_name:item.store_name,profile_label:this.config.profile_label,browser_backend:this.config.browser_backend||'chrome',stage,timestamps:item.timestamps})+'\n',{mode:0o600});
   }
   health() {
     this.expireHeld();
     return {status:'ok',mode:this.config.dry_run?'dry_run':'live',
-      browser_ready:this.browser.ready(),active_event_id:this.state.active,
+      browser_ready:this.browser.ready(),active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
       ready:this.config.dry_run||this.browser.ready(),pending_events:Object.values(this.state.events).filter(x=>x.status==='held').length,apple_pay_verified:'manual_verification_required'};
   }
   accept(event) {
@@ -53,10 +54,12 @@ export class Engine {
     return {code:status==='busy'?409:status==='queue_full'?429:status==='browser_not_ready'?503:202,body:this.public(item)};
   }
   public(item) {
-    return {event_id:item.event_id,status:item.status,reason:item.reason,timestamps:item.timestamps,...(item.feedback?{feedback:item.feedback}:{})};
+    return {event_id:item.event_id,status:item.status,reason:item.reason,timestamps:item.timestamps,...(item.feedback?{feedback:item.feedback}:{}),...(item.signal_feedback?{signal_feedback:item.signal_feedback}:{}),...(item.last_observation?{last_observation:item.last_observation,diagnostic_count:item.diagnostic_count}:{}),...(item.idle_watch_state?{idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at}:{}),...(item.release_reason?{release_reason:item.release_reason,reset_at:item.reset_at}:{})};
   }
-  stage(item,name) {
-    item.timestamps[name]=now(); this.save(); this.log(item,name);
+  stage(item,name,detail) {
+    item.timestamps[name]=now();
+    if(detail){const observation=sanitizeObservation(detail);appendDiagnostic(join(this.config.state_dir,'diagnostics.jsonl'),{at:item.timestamps[name],event_id:item.event_id,stage:name,...observation});item.last_observation=observation;item.diagnostic_count=(item.diagnostic_count||0)+1;}
+    this.save(); this.log(item,name);
   }
   async execute(item) {
     this.browser.activeTaskId=item.event_id;
@@ -67,17 +70,23 @@ export class Engine {
     if (this.config.dry_run) {
       item.status='dry_run_completed';this.stage(item,'finished_at');this.state.active=null;this.save();this.dispatch();return;
     }
+    if(this.browser.onEventStarted)try{
+      Promise.resolve(this.browser.onEventStarted(item)).then(feedback=>{item.signal_feedback=feedback;this.stage(item,'signal_alert_dispatched_at');}).catch(()=>this.stage(item,'signal_alert_failed_at'));
+    }catch{this.stage(item,'signal_alert_failed_at');}
     try {
-      const result=await this.browser.prepare(item,name=>this.stage(item,name));
+      const result=await this.browser.prepare(item,(name,detail)=>this.stage(item,name,detail));
       item.status=result||'awaiting_user';
     } catch (error) {
       item.status=error instanceof Stop&&error.code==='pickup_unavailable'?'pickup_unavailable':'manual_review';
       item.reason=error instanceof Stop?error.code:error?.name==='TimeoutError'?'timeout':'browser_error';
     }
-    // Every live outcome stays locked, including uncertainty/errors and unavailable pickup.
+    // Once stock was found or checkout progressed, never navigate back even if
+    // a later error is mislabeled as unavailable. Preserve the user's page.
+    const progressed=['pickup_stock_found_at','store_selected_at','time_selected_at','pickup_time_at','details_navigation_at','details_page_ready_at','contact_verified_at','pickup_details_at','handoff_at'].some(key=>Object.hasOwn(item.timestamps,key));
+    if(item.status==='pickup_unavailable'&&progressed){item.status='manual_review';item.reason='pickup_unavailable_after_selection_preserved';}
     this.stage(item,'finished_at');
     this.signaling=true;
-    try { const feedback=await this.browser.handoff(item.status);if(feedback){item.feedback=feedback;this.stage(item,'feedback_completed_at');} }
+    try { const feedback=await this.browser.handoff(item.status,item.reason);if(feedback){item.feedback=feedback;this.stage(item,feedback.audio_queued!==undefined?'feedback_dispatched_at':'feedback_completed_at');} }
     catch { item.reason=item.reason||'attention_signal_failed';this.save();this.log(item,'attention_signal_failed'); }
     finally {this.signaling=false;}
     if(item.status==='pickup_unavailable'&&this.config.auto_release_unavailable) {
@@ -88,6 +97,32 @@ export class Engine {
       } catch {item.reason='standby_restore_failed';this.save();this.log(item,'standby_restore_failed');}
       finally {this.releasing=false;}
     }
+  }
+  async watchIdle(nowMs=Date.now()) {
+    const seconds=this.config.handoff_idle_timeout_seconds||0,item=this.state.events[this.state.active];
+    if(!seconds||!item||item.status!=='awaiting_user'||this.releasing||this.signaling||!this.browser.inspectIdle)return false;
+    if(this.nextIdlePoll&&nowMs<this.nextIdlePoll)return false;
+    this.nextIdlePoll=nowMs+5000;
+    let state;
+    try{state=await this.browser.inspectIdle(item);}catch{state={status:'unreadable'};}
+    const changed=item.idle_watch_state!==state.status||item.last_user_activity_at!==state.last_activity_at;
+    item.idle_watch_state=state.status;
+    if(state.last_activity_at)item.last_user_activity_at=state.last_activity_at;
+    if(changed){this.save();this.log(item,'handoff_idle_watch');}
+    if(this.state.active!==item.event_id||item.status!=='awaiting_user'||this.releasing||this.signaling)return false;
+    if(state.status!=='tracking'||!Number.isFinite(state.idle_ms)||state.idle_ms<seconds*1000)return false;
+    this.releasing=true;
+    try{
+      const claim=await this.browser.returnIfIdle(item,seconds*1000);
+      if(!claim.claimed){item.idle_watch_state=claim.status;this.save();this.log(item,'idle_return_cancelled');return false;}
+      await this.browser.seedIdle();
+      item.status='idle_timeout_returned';item.release_reason='handoff_idle_timeout';
+      this.stage(item,'idle_returned_at');
+      try{item.idle_feedback=await this.browser.notifyIdleReturn?.(item);}catch{item.idle_feedback={notification_submitted:false};}
+      return this.reset(item.event_id,true);
+    }catch{
+      item.status='manual_review';item.reason='idle_restore_failed';this.save();this.log(item,'idle_restore_failed');try{item.idle_feedback=await this.browser.handoff('manual_review','idle_restore_failed');this.save();}catch{}return false;
+    }finally{this.releasing=false;}
   }
   reset(eventId,internalRelease=false) {
     if(this.signaling||this.releasing&&!internalRelease)throw new Stop('task_still_running');

@@ -59,3 +59,13 @@ test('Safari idle missing window holds event until window reopens, then dispatch
  const windows=[{id:43,name:'Duo512Black — Bag',tabs:1}];f.setWindows(windows);await pollSafariSlots([{browser:f.b,engine:e}],windows);await turn();await turn();
  assert.equal(e.state.events[event.event_id].status,'awaiting_user');assert.equal(f.calls.length,1);
 });
+test('Safari adapter forwards event store identity with observations and handoff reason',async()=>{
+ const f=fixture();const observations=[];await f.b.start();
+ f.b.workflow=async(w,u,c,{stage})=>{stage('pickup_inventory_observed_at',{kind:'pickup_inventory',verdict:'target_store_not_listed',stores:[]});throw new (await import('../protocol.mjs')).Stop('target_store_not_listed');};
+ await assert.rejects(()=>f.b.prepare({product_url:url,store_name:'Garden State Plaza',store_id:'R117'},(name,detail)=>observations.push(detail)),e=>e.code==='target_store_not_listed');
+ assert.equal(observations[0].requested_store_id,'R117');assert.equal(observations[0].requested_store_name,'Apple Garden State Plaza');assert.equal(observations[1].error_code,'target_store_not_listed');
+ f.b.signal=async(window,result)=>result;assert.equal((await f.b.handoff('manual_review','target_store_not_listed')).reason,'target_store_not_listed');
+});
+test('configuration is announced on signal start and final handoff skips duplicate audio',async()=>{
+ const f=fixture();await f.b.start();const calls=[];f.b.signal=async(w,r,c)=>{calls.push({r,c});return {audio_queued:true};};const e={event_id:'signal-test',product_url:url};f.b.activeTaskId=e.event_id;await f.b.onEventStarted(e);await f.b.handoff('awaiting_user');assert.equal(calls[0].r.status,'inventory_signal');assert.equal(calls[1].c.mute_audio,true);
+});

@@ -6,6 +6,7 @@ import {createReceiver} from './server.mjs';
 import {PickupBrowser} from './browser.mjs';
 import {SafariPickupBrowser,pollSafariSlots} from './safari/browser.mjs';
 import {listSafariWindows} from './safari/shopping.mjs';
+import {audioQueueState} from './safari/feedback.mjs';
 import {Engine} from './engine.mjs';
 import {Stop,productURL,expectedProduct,privateIPv4} from './protocol.mjs';
 
@@ -37,7 +38,7 @@ export class ProfileRouter {
   expireHeld(){for(const s of this.slots)s.engine.expireHeld();}
   health(){
     const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],...s.engine.health()}));
-    return {status:'ok',browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
+    return {status:'ok',...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
   }
 }
 
@@ -47,6 +48,7 @@ export async function main() {
   if(!privateIPv4(cfg.host)||!Number.isInteger(cfg.port)||cfg.port<1024||cfg.port>65535||!Array.isArray(cfg.allowed_sources)||!cfg.allowed_sources.length||cfg.allowed_sources.some(s=>!privateIPv4(s))||typeof cfg.dry_run!=='boolean'||!Array.isArray(cfg.slots)||cfg.slots.length!==4||!cfg.selectors?.bag_item||!cfg.selectors?.store_list||!cfg.selectors?.store_row)throw new Stop('invalid_router_config');
   if(!cfg.dry_run&&cfg.selectors_verified!==true)throw new Stop('verify_selectors_before_live');
   const secret=process.env[cfg.secret_env||'PICKUP_SHARED_SECRET'];if(!secret||secret.length<32)throw new Stop('secret_too_short');
+  if(cfg.handoff_idle_timeout_seconds!==undefined&&(!Number.isInteger(cfg.handoff_idle_timeout_seconds)||cfg.handoff_idle_timeout_seconds<0||cfg.handoff_idle_timeout_seconds>86400))throw new Stop('invalid_handoff_idle_timeout');
   if(!['chrome','safari'].includes(cfg.browser_backend||'chrome'))throw new Stop('invalid_browser_backend');
   const paths=[];let server,local,pollTimer;
   function lock(dir){
@@ -66,7 +68,7 @@ export async function main() {
       const browser=cfg.browser_backend==='safari'?new SafariPickupBrowser(c):new PickupBrowser(c);await browser.start();const engine=new Engine(c,browser);slots.push({...s,browser,engine});
     }
     const router=new ProfileRouter(cfg,slots);
-    if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());}catch{}finally{polling=false;}},2000);pollTimer.unref();}
+    if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());for(const slot of slots)await slot.engine.watchIdle();}catch{}finally{polling=false;}},2000);pollTimer.unref();}
     ({server}=createReceiver(cfg,{ready:()=>true},secret,router));
     await new Promise((ok,bad)=>{server.once('error',bad);server.listen(cfg.port,cfg.host,ok);});
     if(!cfg.host.startsWith('127.')){local=http.createServer(server.listeners('request')[0]);local.requestTimeout=5000;local.headersTimeout=5000;local.timeout=5000;await new Promise((ok,bad)=>{local.once('error',bad);local.listen(cfg.port,'127.0.0.1',ok);});}

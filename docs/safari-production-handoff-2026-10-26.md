@@ -33,7 +33,7 @@ uses the experimental any-available-store option.
 
 Safari executes the deterministic shared workflow with no AI. It verifies the
 bag, enters Apple Pay checkout/pickup, and checks the requested store. After a
-recognized unavailable state it refreshes at most five additional times, with a
+recognized unavailable state it refreshes at most ten additional times (eleven checks total), with a
 one-second pause and another stock check before each refresh. A store becoming
 available stops refreshes immediately. A visible fieldset alone is insufficient:
 store radio rows must finish rendering before inventory is evaluated. Unknown
@@ -113,3 +113,34 @@ and `safari-cutover.local.json`. Rollback plist/config are preserved under
 `~/Library/Application Support/iPhoneDuo/deployment-backups/safari-1793058281513134000`.
 Rollback must preserve any newer Safari event histories and active tasks; do not
 blindly reactivate stale Chrome state or replay requests.
+
+
+## Preserve an available pickup page
+
+After the user requested ten retries, production was updated to ten additional
+refreshes after the initial check (eleven checks total), with a one-second pause.
+All historical six-check timing measurements above retain their original meaning.
+A `pickup_stock_found_at` marker now latches when a selectable target is found.
+The Engine also recognizes later pickup/contact/handoff stages. If any later
+operation erroneously reports `pickup_unavailable`, it becomes manual review
+with `pickup_unavailable_after_selection_preserved`; no standby navigation or
+queue release occurs. A successful handoff and any post-stock uncertainty stay
+on the current page, preserving the task lock for user continuation. Explicit
+user release or task-window close/reopen remain separate authorized actions.
+
+## Ten-minute inactivity return
+
+Production now enables a 600-second inactivity timeout on the awaiting-user
+handoff page. User page activity restarts the timer. An idle handoff returns to
+its prepared bag and releases its lock only after restoration succeeds. Starting
+Apple Pay suspends the automatic return; changed or uncertain page state also
+preserves the lock. See [inactivity policy and validation](safari-idle-timeout.md).
+This replaces indefinite preservation only for a known, tracked, inactive
+handoff page; explicit user operations and payment remain protected.
+
+## Stronger audible alerts
+
+Current reminders use louder system output (set once from 38% to 70%), three
+Sosumi tones plus Chinese product speech for a ready handoff, and two Ping tones
+for unavailable pickup. See [attention alert behavior](safari-alerts.md). Historical
+sound names in earlier test records describe the versions actually tested then.

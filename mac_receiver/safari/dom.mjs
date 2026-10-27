@@ -60,8 +60,14 @@ export function safariDOM({op,args={}}) {
     const input=one(all('input[role="combobox"]').filter(e=>name(e)==='Zip Code or City, State'&&visible(e)));
     set(input,args.zip);click(one(buttons().filter(e=>name(e)==='Apply')));return {applied:true};
   }
-  if(op==='stores')return {stores:stores().map(e=>({name:name(e),enabled:enabled(e)}))};
-  if(op==='moreStores') {const b=buttons().filter(e=>name(e)==='Show more stores');if(b.length!==1)return {expanded:false};click(b[0]);return {expanded:true};}
+  if(op==='stores'||op==='diagnosticState') {
+    const zip=all('input[role="combobox"]').find(e=>name(e)==='Zip Code or City, State');
+    const zipButton=buttons().map(name).find(s=>/^\d{5}(?:\s|$)/.test(s));
+    const rawZip=zip?.value||zipButton?.match(/^\d{5}/)?.[0]||null;
+    return {page:{origin:u.origin,path:u.pathname,state:u.searchParams.get('_s')},displayed_zip:/^\d{5}$/.test(rawZip||'')?rawZip:null,
+      stores:stores().map(e=>{const label=name(e);return {name:label,enabled:enabled(e),visible:visible(Array.from(e.labels||[]).find(visible)||e),store_id:((e.id+' '+e.value).match(/\bR\d{3,4}\b/)||[])[0]||null,availability_text:(label.match(/Currently unavailable|Unavailable for pickup|Not available|unavailable|Available Today|Available Tomorrow|Available for pickup/i)||[])[0]||null};})};
+  }
+  if(op==='moreStores') {const root=storeList();const b=root?all('button,[role="button"],a',root).filter(e=>visible(e)&&/^Show more stores\b/.test(name(e))):[];if(b.length!==1)return {expanded:false};click(b[0]);return {expanded:true};}
   if(op==='selectStore') {return {selected:check(one(stores().filter(e=>name(e)===args.name)))};}
   const dates=()=>{const list=storeList();return list?radio(/^(january|february|march|april|may|june|july|august|september|october|november|december)\s*\d{1,2}$/i,list):[];};
   if(op==='dates')return {dates:dates().map(e=>({name:name(e),enabled:enabled(e),checked:e.checked}))};

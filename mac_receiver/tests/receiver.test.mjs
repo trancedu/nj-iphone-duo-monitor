@@ -137,3 +137,20 @@ test('production sold-out outcome reseeds and releases, but seed failure preserv
   await h.request('/prepare',event());await nextTurn();await nextTurn();assert.equal(seeds,1);assert.equal(h.engine.state.active,null);
   fail=true;await h.request('/prepare',event('failed-restore'));await nextTurn();await nextTurn();assert.equal(h.engine.state.active,'failed-restore');assert.equal(h.engine.state.events['failed-restore'].reason,'standby_restore_failed');
 });
+test('successful handoff stays locked without standby navigation even with auto release enabled',async t=>{
+ let seeds=0,prepares=0;
+ const browser={ready:()=>true,prepare:async(e,stage)=>{prepares++;stage('pickup_stock_found_at');stage('handoff_at');return 'awaiting_user';},handoff:async()=>{},seedIdle:async()=>{seeds++;}};
+ const h=await harness(t,false,browser);Object.assign(h.config,{auto_release_unavailable:true,queue_while_busy:true});
+ await h.request('/prepare',event());await nextTurn();await nextTurn();
+ await h.request('/prepare',{...event('next-held'),detected_at:new Date().toISOString()});await nextTurn();
+ assert.equal(h.engine.state.active,'event-one');assert.equal(h.engine.state.events['event-one'].status,'awaiting_user');assert.equal(h.engine.state.events['next-held'].status,'held');assert.equal(seeds,0);assert.equal(prepares,1);
+});
+test('an unavailable error after finding stock preserves page and lock for manual continuation',async t=>{
+ let seeds=0;const browser={ready:()=>true,prepare:async(e,stage)=>{stage('pickup_stock_found_at');throw new Stop('pickup_unavailable');},handoff:async()=>{},seedIdle:async()=>{seeds++;}};
+ const h=await harness(t,false,browser);h.config.auto_release_unavailable=true;
+ await h.request('/prepare',event());await nextTurn();await nextTurn();assert.equal(h.engine.state.events['event-one'].status,'manual_review');assert.equal(h.engine.state.events['event-one'].reason,'pickup_unavailable_after_selection_preserved');assert.equal(h.engine.state.active,'event-one');assert.equal(seeds,0);
+});
+test('incoming signal announcement never delays preparation or repeats a duplicate/held request',async t=>{
+ let announceDone,announcements=0,prepares=0;const browser={ready:()=>true,onEventStarted:()=>{announcements++;return new Promise(r=>{announceDone=r;});},prepare:async()=>{prepares++;return 'awaiting_user';},handoff:async()=>{}};
+ const h=await harness(t,false,browser);h.config.queue_while_busy=true;const first=event();await h.request('/prepare',first);await nextTurn();await nextTurn();assert.equal(prepares,1);assert.equal(h.engine.state.events[first.event_id].status,'awaiting_user');await h.request('/prepare',first);await h.request('/prepare',event('held-signal'));assert.equal(announcements,1);announceDone({audio_queued:true});await nextTurn();
+});

@@ -5,7 +5,9 @@ import {readFileSync,mkdirSync,writeFileSync,openSync,closeSync,unlinkSync} from
 import {resolve,dirname,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {safariDOM} from './dom.mjs';
+import {handoffActivity} from './idle.mjs';
 import {signalSafari} from './feedback.mjs';
+import {classifyStores,sanitizeObservation} from './diagnostics.mjs';
 import {productURL,expectedProduct,Stop} from '../protocol.mjs';
 import {chooseTimeWindow,validatePickupDetails} from '../pickup_details.mjs';
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
@@ -31,7 +33,8 @@ export class SafariWindow {
     return `tell application "Safari"\nset w to window id ${this.id}\nif name of w does not start with ${asString(this.profile+' — ')} then error "profile_changed"\nif (count of tabs of w) is not 1 then error "single_test_tab_required"\n${body}\nend tell`;
   }
   async call(op,args={}) {
-    const js=`(()=>{try{return JSON.stringify({ok:true,value:(${safariDOM.toString()})(${JSON.stringify({op,args})})});}catch(e){return JSON.stringify({ok:false,error:e.message});}})()`;
+    const execute=['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM;
+    const js=`(()=>{try{return JSON.stringify({ok:true,value:(${execute.toString()})(${JSON.stringify({op,args})})});}catch(e){return JSON.stringify({ok:false,error:e.message});}})()`;
     const raw=await appleScript(this.script(`return do JavaScript ${asString(js)} in tab 1 of w`));
     let result;try{result=JSON.parse(raw);}catch{throw new Stop('safari_script_response_unrecognized');}
     if(!result.ok)throw new Stop(result.error||'safari_dom_failed');return result.value;
@@ -74,30 +77,58 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     if(ready.zipNeeded){await call('zip',{zip:config.pickup_zip});await wait(async()=>(await call('pickupReady')).ready);}
   };
   await openPickup();stage('pickup_page_ready_at');
-  const retries=config.pickup_unavailable_retries??5,interval=config.pickup_retry_interval_ms??1000;
+  const retries=config.pickup_unavailable_retries??10,interval=config.pickup_retry_interval_ms??1000;
   if(!Number.isInteger(retries)||retries<0||retries>10||!Number.isInteger(interval)||interval<1000||interval>10000)throw new Stop('invalid_pickup_retry_config');
+  let lastRead;
   const readStores=async()=>{
-    try{return await wait(async()=>{const s=(await call('stores')).stores;return s.length?s:null;});}
+    try{return await wait(async()=>{const r=await call('stores');if(!r.stores.length)return null;lastRead=r;return r.stores;});}
     catch(e){if(e instanceof Stop&&e.code==='safari_step_timeout')throw new Stop('store_list_unrecognized');throw e;}
+  };
+  const preferred=config.pickup_details.store_name,any=config.test_any_available_store===true;
+  const observe=(attempt,phase,stores,extra={})=>{
+    const result=classifyStores(stores,preferred,any);
+    stage('pickup_inventory_observed_at',{kind:'pickup_inventory',attempt,phase,requested_store_name:preferred,configured_zip:config.pickup_zip,page:lastRead?.page,displayed_zip:lastRead?.displayed_zip,stores,verdict:result.verdict,...extra});
+    return result;
   };
   let chosen;
   for(let i=0;i<=retries;i++) {
     stage(`pickup_check_${i}_started_at`);
-    let stores=await readStores();
-    const preferred=config.pickup_details.store_name;
-    const matches=s=>s.name.startsWith(preferred)&&/^(?:\s|\d|Available\b|Currently\b|$)/.test(s.name.slice(preferred.length));
-    if(!config.test_any_available_store&&!stores.some(matches)){const more=await call('moreStores');if(more.expanded){stores=await wait(async()=>{const s=(await call('stores')).stores;return s.some(matches)?s:null;});}}
-    chosen=stores.find(s=>s.enabled&&(config.test_any_available_store||matches(s)));
-    if(chosen)break;
+    let stores=await readStores(),check=observe(i,'initial',stores);
+    if(!any&&check.verdict==='target_store_not_listed'){
+      const more=await call('moreStores');
+      if(more.expanded){
+        try{stores=await wait(async()=>{const r=await call('stores');if(r.stores.length)lastRead=r;return r.stores.length&&classifyStores(r.stores,preferred,any).verdict!=='target_store_not_listed'?r.stores:null;});}
+        catch(error){if(error instanceof Stop&&error.code==='safari_step_timeout'){observe(i,'after_expansion',lastRead?.stores||stores,{expansion_available:true});throw new Stop('target_store_not_listed');}throw error;}
+      }
+      check=observe(i,'after_expansion',stores,{expansion_available:more.expanded});
+    }
+    if(check.verdict==='target_store_ambiguous')throw new Stop('target_store_ambiguous');
+    chosen=check.target;if(chosen)break;
     stage(`pickup_check_${i}_unavailable_at`);
-    if(i===retries)return {status:'pickup_unavailable',product,checks:i+1};
+    if(i===retries){
+      if(check.verdict==='target_store_not_listed')throw new Stop('target_store_not_listed');
+      return {status:'pickup_unavailable',product,checks:i+1};
+    }
     await pause(interval);
-    // Stock can update during the pause. Recheck immediately before reload so
-    // a now-available target continues without destroying its current page.
-    const current=await readStores();
-    chosen=current.find(s=>s.enabled&&(config.test_any_available_store||matches(s)));
+    // Recheck before reloading; keep an available target's page intact.
+    const current=await readStores(),next=observe(i,'before_refresh',current);
+    if(next.verdict==='target_store_ambiguous')throw new Stop('target_store_ambiguous');
+    chosen=next.target;
     if(chosen){stage('pickup_available_before_refresh_at');break;}
     stage(`pickup_refresh_${i+1}_at`);await window.reload();await openPickup();
+  }
+  stage('pickup_stock_found_at');
+  if(chosen.visible===false){
+    const more=await call('moreStores');
+    if(!more.expanded)throw new Stop('target_store_hidden');
+    chosen=await wait(async()=>{
+      const stores=await readStores(),result=classifyStores(stores,preferred,any);
+      observe(null,'reveal_target',stores,{expansion_available:true});
+      if(result.verdict==='target_store_not_selectable')throw new Stop('target_store_changed_after_expansion');
+      if(result.verdict==='target_store_ambiguous')throw new Stop('target_store_ambiguous');
+      return result.target&&result.target.visible!==false?result.target:null;
+    });
+    stage('target_store_revealed_at');
   }
   await wait(async()=>(await call('selectStore',{name:chosen.name})).selected);stage('store_selected_at');
   const dates=await wait(async()=>{const ds=(await call('dates')).dates;return ds.some(d=>d.enabled)?ds:null;});
@@ -108,6 +139,7 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
   await call('selectTime',{value:time.value});stage('time_selected_at');
   await call('continuePickup');stage('details_navigation_at');
   await wait(async()=>(await call('detailsReady')).ready);stage('details_page_ready_at');
+  if(config.handoff_idle_timeout_seconds>0&&config.handoff_event_id){const idle=await call('armIdle',{event_id:config.handoff_event_id});if(['tracking','payment_started'].includes(idle.status))stage('handoff_idle_armed_at');}
   await wait(async()=>(await call('fillContact',{contact:config.pickup_details})).filled);stage('contact_verified_at');
   await wait(async()=>(await call('handoffReady')).ready);stage('handoff_at');
   await window.foreground();
@@ -132,10 +164,10 @@ async function main() {
   if(action==='inspect'){console.log(JSON.stringify(await window.call('snapshot')));return;}
   try{fd=openSync(lock,'wx',0o600);}catch{throw new Stop('safari_test_window_locked');}
   writeFileSync(fd,String(process.pid));closeSync(fd);
-  const timestamps={};const out=join(dir,`safari-${window.id}-${Date.now()}.local.json`);let result;
-  const save=()=>{writeFileSync(out,JSON.stringify({window_id:window.id,profile:window.profile,timestamps,...result},null,2),{mode:0o600});};
+  const timestamps={},observations=[];const out=join(dir,`safari-${window.id}-${Date.now()}.local.json`);let result;
+  const save=()=>{writeFileSync(out,JSON.stringify({window_id:window.id,profile:window.profile,timestamps,observations,...result},null,2),{mode:0o600});};
   try{
-    result=action==='inspect'?await window.call('snapshot'):await prepareSafari(window,url,config,{seedOnly:action==='seed',stage:name=>{timestamps[name]=new Date().toISOString();save();}});
+    result=action==='inspect'?await window.call('snapshot'):await prepareSafari(window,url,config,{seedOnly:action==='seed',stage:(name,detail)=>{timestamps[name]=new Date().toISOString();if(detail)observations.push({at:timestamps[name],...sanitizeObservation({...detail,backend:'safari',profile:window.profile,window_id:window.id})});save();}});
     timestamps.finished_at=new Date().toISOString();save();
     result.feedback=await signalSafari(window,result,{profile:window.profile,product:expectedProduct(url)});
     timestamps.feedback_completed_at=new Date().toISOString();save();console.log(JSON.stringify({...result,timestamps,report:out}));
