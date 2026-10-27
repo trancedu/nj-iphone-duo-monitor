@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
-import {PickupBrowser} from '../browser.mjs';
+import {PickupBrowser,ensureRequestedStoreVisible} from '../browser.mjs';
 import {chooseTimeWindow,preparePickupDetails,checkPickupRadio} from '../pickup_details.mjs';
 
 const now=new Date('2026-10-26T21:00:00Z'); // 17:00 New York
@@ -55,4 +55,25 @@ test('native store radio covered by its associated label is selected without for
   await page.setContent('<div style="position:relative;width:400px;height:60px"><input id="store" type="radio" style="position:absolute;inset:0;width:100%;height:100%;opacity:0"><label for="store" style="position:absolute;inset:0;background:white;z-index:2"><span>Apple SoHo Available Today</span></label></div>');
   const radio=page.getByRole('radio',{name:'Apple SoHo Available Today'});
   await checkPickupRadio(page,radio);assert.equal(await radio.isChecked(),true);
+});
+for(const control of ['button','link'])test(`Chrome expands hidden requested store via ${control}, never selects the first store`,async t=>{
+  const chrome=await chromium.launch({channel:'chrome',headless:true});t.after(()=>chrome.close());
+  const page=await chrome.newPage();page.setDefaultTimeout(2000);
+  const label='<label><input type="radio" name="store">Apple West 14th Street Available Today</label>';
+  const action="window.expansions++;setTimeout(()=>{document.getElementById('extra').hidden=false},100);this.remove();return false";
+  await page.setContent(`<script>window.expansions=0</script><fieldset data-list><label><input type="radio" name="store">Apple Other Store Available Today</label><div id="extra" hidden>${label}</div>${control==='button'?`<button onclick="${action}">Show more stores (7)</button>`:`<a href="#" onclick="${action}">Show more stores</a>`}</fieldset>`);
+  const browser=new PickupBrowser({selectors:{store_list:'[data-list]'},pickup_details:contact});browser.page=page;browser.requestedStore='West 14th Street';
+  const stages=[];await ensureRequestedStoreVisible(browser,s=>stages.push(s));await ensureRequestedStoreVisible(browser,()=>{});
+  assert.equal(await page.evaluate(()=>window.expansions),1);assert.equal(stages.length,1);
+  assert.equal(await page.getByRole('radio',{name:'Apple West 14th Street Available Today'}).isVisible(),true);
+  assert.equal(await page.locator('input:checked').count(),0);
+});
+test('visible fallback configured store needs no expansion; missing store never falls back to first',async t=>{
+  const chrome=await chromium.launch({channel:'chrome',headless:true});t.after(()=>chrome.close());
+  const page=await chrome.newPage();await page.setContent('<fieldset data-list><label><input type="radio" name="store">Apple West 14th Street Available Today</label><button onclick="window.expanded=true">Show more stores</button></fieldset>');
+  const browser=new PickupBrowser({selectors:{store_list:'[data-list]'},pickup_details:contact});browser.page=page;
+  await ensureRequestedStoreVisible(browser);assert.equal(await page.evaluate(()=>window.expanded),undefined);
+  await page.locator('button').evaluate(e=>e.remove());browser.requestedStore='Apple Missing Store';
+  await assert.rejects(()=>ensureRequestedStoreVisible(browser),e=>e.code==='target_store_not_listed');
+  assert.equal(await page.locator('input:checked').count(),0);
 });

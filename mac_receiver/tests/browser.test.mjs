@@ -26,7 +26,7 @@ async function fixture(t,options={}) {
       adds++;bag='same';html=options.uncertain?'<h1>Something went wrong</h1>':`<button onclick="location.href='/shop/bag'">Review Bag</button>`;
     } else if(path==='/checkout') {
       checkout++;
-      html=`<label><input type="radio" name="fulfillment" id="pickup" onchange="document.querySelector('${options.zip?'#zip-form':'[data-autom=store-list]'}').hidden=false">I’ll pick it up</label><label><input type="radio" name="fulfillment" id="delivery">Deliver to me</label>${options.zip?`<div id="zip-form" hidden><label>Zip Code or City, State<input role="combobox"></label><button onclick="document.querySelector('[data-autom=store-list]').hidden=false;document.querySelector('#zip-form').hidden=true">Apply</button></div>`:''}<div data-autom="store-list" hidden><div data-autom="store-row"><label><input type="radio" name="store" ${options.unavailable&&!(options.availableAfter&&checkout>=options.availableAfter)?'disabled':''}>American Dream</label></div></div><button onclick="location.href='/forbidden'">Continue</button><button onclick="location.href='/forbidden'">Pay</button>`;
+      html=`<label><input type="radio" name="fulfillment" id="pickup" onchange="document.querySelector('${options.zip?'#zip-form':'[data-autom=store-list]'}').hidden=false">I’ll pick it up</label><label><input type="radio" name="fulfillment" id="delivery">Deliver to me</label>${options.zip?`<div id="zip-form" hidden><label>Zip Code or City, State<input role="combobox"></label><button onclick="document.querySelector('[data-autom=store-list]').hidden=false;document.querySelector('#zip-form').hidden=true">Apply</button></div>`:''}<div data-autom="store-list" hidden>${options.zip?'<button>07094</button>':''}<div data-autom="store-row"><label><input type="radio" name="store" ${options.unavailable&&!(options.availableAfter&&checkout>=options.availableAfter)?'disabled':''}>American Dream</label></div></div><button onclick="location.href='/forbidden'">Continue</button><button onclick="location.href='/forbidden'">Pay</button>`;
     } else {forbidden++;html='<h1>Forbidden action</h1>';}
     await route.fulfill({contentType:'text/html; charset=utf-8',body:html});
   });
@@ -129,14 +129,14 @@ test('pickup refresh resumes when stock appears, without adding or checking out 
   assert.ok(!stages.includes('pickup_refresh_2_at'));
   assert.equal(await f.page.locator('#pickup').isChecked(),true);
 });
-test('five additional refreshes exhaust and stop with no payment or cart mutation',async t=>{
+test('three additional refreshes exhaust and stop with no payment or cart mutation',async t=>{
   const f=await fixture(t,{existing:'same',unavailable:true,zip:true});
-  Object.assign(f.browser.config,{pickup_unavailable_retries:5,pickup_zip:'07094'});
+  Object.assign(f.browser.config,{pickup_unavailable_retries:3,pickup_zip:'07094'});
   const stages=[];
   await assert.rejects(()=>f.browser.prepare({product_url:URL},s=>stages.push(s)),e=>e.code==='pickup_unavailable');
-  assert.deepEqual(f.counts(),{adds:0,checkout:6,forbidden:0});
-  assert.equal(stages.filter(s=>/^pickup_refresh_/.test(s)).length,5);
-  assert.ok(stages.includes('pickup_check_5_unavailable_at'));
+  assert.deepEqual(f.counts(),{adds:0,checkout:4,forbidden:0});
+  assert.equal(stages.filter(s=>/^pickup_refresh_/.test(s)).length,3);
+  assert.ok(stages.includes('pickup_check_3_unavailable_at'));
   assert.equal(await f.page.locator('#zip-form input').inputValue(),'07094');
 });
 test('unrecognized pickup DOM stops immediately rather than refreshing',async t=>{

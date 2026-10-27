@@ -8,6 +8,7 @@ import {preparePickupDetails,validatePickupDetails} from './pickup_details.mjs';
 import {clearBag} from './clear_bag.mjs';
 import {retainTargetVariant} from './variant_bag.mjs';
 import {isPreparedProductURL,preparedPageURL,preparedProductPage,warmProductPages} from './warm_products.mjs';
+import {pickupLocationDOM} from './pickup_location.mjs';
 const run = promisify(execFile);
 const appleNavigation = value => {
   try { const u=new URL(value);return u.protocol==='https:' && (u.hostname==='www.apple.com'||/^secure\d*\.store\.apple\.com$/.test(u.hostname)); }
@@ -250,12 +251,19 @@ export async function inspectPickupWithRetries(browser,stage) {
   const retries=browser.config.pickup_unavailable_retries??0;
   const delay=browser.config.pickup_retry_interval_ms??1000;
   if(!Number.isInteger(retries)||retries<0||retries>10||!Number.isInteger(delay)||delay<1000||delay>10000) throw new Stop('invalid_pickup_retry_config');
+  let locationChecked=false;
   for(let attempt=0;;attempt++) {
     stage(`pickup_check_${attempt}_started_at`);
     try {return await inspectPickupStores(browser,stage);}
     catch(error) {
       // Only a recognized sold-out state is retried. Unknown pages, errors,
       // captcha and failures after selecting a time/contact retain the lock.
+      if(!locationChecked&&error instanceof Stop&&['pickup_unavailable','configured_store_unavailable','target_store_not_listed'].includes(error.code)){
+        locationChecked=true;
+        if(await correctPickupLocation(browser,stage)){
+          try{return await inspectPickupStores(browser,stage);}catch(next){error=next;}
+        }
+      }
       if(!(error instanceof Stop)||!['pickup_unavailable','configured_store_unavailable'].includes(error.code))throw error;
       stage(`pickup_check_${attempt}_unavailable_at`);
       if(attempt===retries)throw new Stop('pickup_unavailable');
@@ -268,20 +276,29 @@ export async function inspectPickupWithRetries(browser,stage) {
   }
 }
 
+export async function correctPickupLocation(browser,stage=()=>{}) {
+  if(!/^\d{5}$/.test(browser.config.pickup_zip||''))return false;
+  const page=browser.page;await browser.guard();
+  const current=await page.evaluate(pickupLocationDOM,{});
+  if(current.displayed_zip===browser.config.pickup_zip)return false;
+  stage('pickup_location_correction_started_at');
+  await page.evaluate(pickupLocationDOM,{open:true});
+  const zip=page.getByRole('combobox',{name:'Zip Code or City, State',exact:true});
+  await zip.waitFor({state:'visible'});await zip.fill(browser.config.pickup_zip);
+  await page.getByRole('button',{name:'Apply',exact:true}).click();
+  await page.waitForTimeout(500);
+  await page.getByRole('img',{name:'Processing',exact:true}).waitFor({state:'hidden'});
+  await page.locator(browser.config.selectors.store_list).waitFor({state:'visible'});
+  stage('pickup_location_corrected_at');return true;
+}
+
 export async function inspectPickupStores(browser,stage) {
   const page=browser.page;
   const list=page.locator(browser.config.selectors.store_list);
   await list.waitFor({state:'visible'});
   await page.getByRole('img',{name:'Processing',exact:true}).waitFor({state:'hidden'});
   await browser.guard();
-  if(browser.config.pickup_details&&browser.requestedStore) {
-    const wanted=/^Apple\s/.test(browser.requestedStore)?browser.requestedStore:'Apple '+browser.requestedStore;
-    const choice=list.getByRole('radio',{name:new RegExp('^'+escaped(wanted)+'(?:\\s|$)')});
-    if(await choice.count()===0) {
-      const more=list.getByRole('button',{name:'Show more stores',exact:true});
-      if(await more.count()===1&&await more.isVisible()) {await more.click();await choice.waitFor({state:'visible'});}
-    }
-  }
+  await ensureRequestedStoreVisible(browser,stage);
   const rows=list.locator(browser.config.selectors.store_row);
   // Zero/unrecognized rows are unknown, not a sold-out verdict.
   if(await rows.count()===0) throw new Stop('store_list_unrecognized');
@@ -292,8 +309,37 @@ export async function inspectPickupStores(browser,stage) {
   }
   if(recognized===0) throw new Stop('store_list_unrecognized');
   if(selectable===0) throw new Stop('pickup_unavailable');
-  if(browser.config.pickup_details) return preparePickupDetails(browser,stage);
+  if(browser.config.pickup_details){
+    const wanted=browser.requestedStore||browser.config.pickup_details.store_name;
+    const name=/^Apple\s/.test(wanted)?wanted:'Apple '+wanted;
+    const target=list.getByRole('radio',{name:new RegExp('^'+escaped(name)+'(?:\\s|$)')});
+    if(await target.count()!==1||!await target.isEnabled())throw new Stop('configured_store_unavailable');
+    stage('pickup_stock_found_at');
+    return preparePickupDetails(browser,stage);
+  }
   stage('handoff_at');
   // Hard boundary: never select a store/time, Continue, Pay, or submit an order.
   return 'awaiting_user';
+}
+
+export async function ensureRequestedStoreVisible(browser,stage=()=>{}) {
+  if(!browser.config.pickup_details)return;
+  const requested=browser.requestedStore||browser.config.pickup_details.store_name;
+  const wanted=/^Apple\s/.test(requested)?requested:'Apple '+requested;
+  const list=browser.page.locator(browser.config.selectors.store_list);
+  const choice=list.getByRole('radio',{name:new RegExp('^'+escaped(wanted)+'(?:\\s|$)')});
+  if(await choice.count()===0){
+    // Apple has used both buttons and links, sometimes with a count suffix.
+    const name=/^Show more stores\b/i;
+    const more=list.getByRole('button',{name}).or(list.getByRole('link',{name}));
+    const count=await more.count();
+    if(count>1)throw new Stop('more_stores_ambiguous');
+    if(count===1&&await more.isVisible()){
+      await more.click();
+      stage('more_stores_expanded_at');
+      await choice.waitFor({state:'visible'});
+    }
+  }
+  const count=await choice.count();
+  if(count!==1)throw new Stop(count?'target_store_ambiguous':'target_store_not_listed');
 }

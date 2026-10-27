@@ -1,7 +1,7 @@
 {
   "safari_test_state_dir": "runtime-safari",
   "pickup_zip": "07094",
-  "pickup_unavailable_retries": 10,
+  "pickup_unavailable_retries": 2,
   "pickup_retry_interval_ms": 1000,
   "test_any_available_store": true,
   "pickup_details": {

@@ -12,7 +12,7 @@ export class Engine {
     this.state=existsSync(this.file)?JSON.parse(readFileSync(this.file,'utf8')):{active:null,events:{}};
     this.state.events=Object.assign(Object.create(null),this.state.events);
     for (const item of Object.values(this.state.events)) {
-      if(item.status==='held') {item.status='expired';item.reason='receiver_restarted';item.timestamps.finished_at=now();}
+      if(['held','global_waiting'].includes(item.status)) {item.status='expired';item.reason='receiver_restarted';item.timestamps.finished_at=now();}
       if (['queued','running'].includes(item.status)) {
         item.status='interrupted'; item.reason='receiver_restarted'; item.timestamps.finished_at=now();
         this.state.active=item.event_id;
@@ -97,6 +97,9 @@ export class Engine {
         item.release_reason='pickup_unavailable_return_to_standby';this.reset(item.event_id,true);
       } catch {item.reason='standby_restore_failed';this.save();this.log(item,'standby_restore_failed');}
       finally {this.releasing=false;}
+      if(item.release_reason==='pickup_unavailable_return_to_standby'&&!this.state.active){
+        this.onUnavailableReleased?.(item.event_id);
+      }
     }
   }
   async watchIdle(nowMs=Date.now()) {

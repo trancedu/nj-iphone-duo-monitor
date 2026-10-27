@@ -6,6 +6,7 @@ import {resolve,dirname,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {safariDOM} from './dom.mjs';
 import {handoffActivity} from './idle.mjs';
+import {pickupLocationDOM} from '../pickup_location.mjs';
 import {signalSafari} from './feedback.mjs';
 import {classifyStores,sanitizeObservation} from './diagnostics.mjs';
 import {productURL,expectedProduct,Stop} from '../protocol.mjs';
@@ -33,8 +34,10 @@ export class SafariWindow {
     return `tell application "Safari"\nset w to window id ${this.id}\nif name of w does not start with ${asString(this.profile+' — ')} then error "profile_changed"\nif (count of tabs of w) is not 1 then error "single_test_tab_required"\n${body}\nend tell`;
   }
   async call(op,args={}) {
-    const execute=['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM;
-    const js=`(()=>{try{return JSON.stringify({ok:true,value:(${execute.toString()})(${JSON.stringify({op,args})})});}catch(e){return JSON.stringify({ok:false,error:e.message});}})()`;
+    const locationOperation=['locationState','openLocation'].includes(op);
+    const execute=locationOperation?pickupLocationDOM:['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM;
+    const input=locationOperation?{open:op==='openLocation'}:{op,args};
+    const js=`(()=>{try{return JSON.stringify({ok:true,value:(${execute.toString()})(${JSON.stringify(input)})});}catch(e){return JSON.stringify({ok:false,error:e.message});}})()`;
     const raw=await appleScript(this.script(`return do JavaScript ${asString(js)} in tab 1 of w`));
     let result;try{result=JSON.parse(raw);}catch{throw new Stop('safari_script_response_unrecognized');}
     if(!result.ok)throw new Stop(result.error||'safari_dom_failed');return result.value;
@@ -77,7 +80,7 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     if(ready.zipNeeded){await call('zip',{zip:config.pickup_zip});await wait(async()=>(await call('pickupReady')).ready);}
   };
   await openPickup();stage('pickup_page_ready_at');
-  const retries=config.pickup_unavailable_retries??10,interval=config.pickup_retry_interval_ms??1000;
+  const retries=config.pickup_unavailable_retries??2,interval=config.pickup_retry_interval_ms??1000;
   if(!Number.isInteger(retries)||retries<0||retries>10||!Number.isInteger(interval)||interval<1000||interval>10000)throw new Stop('invalid_pickup_retry_config');
   let lastRead;
   const readStores=async()=>{
@@ -90,10 +93,24 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     stage('pickup_inventory_observed_at',{kind:'pickup_inventory',attempt,phase,requested_store_name:preferred,configured_zip:config.pickup_zip,page:lastRead?.page,displayed_zip:lastRead?.displayed_zip,stores,verdict:result.verdict,...extra});
     return result;
   };
-  let chosen;
+  let chosen,locationChecked=false;
   for(let i=0;i<=retries;i++) {
     stage(`pickup_check_${i}_started_at`);
     let stores=await readStores(),check=observe(i,'initial',stores);
+    if(!any&&!locationChecked&&!check.target&&check.verdict!=='target_store_ambiguous'){
+      locationChecked=true;
+      const location=await call('locationState');
+      if(location.displayed_zip!==config.pickup_zip){
+        stage('pickup_location_correction_started_at');
+        await call('openLocation');
+        await wait(async()=>(await call('locationState')).editable);
+        await call('zip',{zip:config.pickup_zip});
+        await pause(500);
+        await wait(async()=>(await call('pickupReady')).ready);
+        stores=await readStores();check=observe(i,'after_zip_correction',stores);
+        stage('pickup_location_corrected_at');
+      }
+    }
     if(!any&&check.verdict==='target_store_not_listed'){
       const more=await call('moreStores');
       if(more.expanded){

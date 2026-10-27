@@ -1,5 +1,15 @@
 # NJ / NY iPhone Duo pickup monitor
 
+> 当前规则已更新：最多额外刷新2次；明确无货回袋后提前解锁；优先新请求，否则补跑10秒内最新候选；有货页面永不自动回袋/解锁。详见[最新执行策略](docs/pickup-execution-policy.md)。下文旧策略描述保留为历史记录。
+
+Current Mac receiver policy (2026-10-27): Safari is active, with Chrome available
+as a standby. One browser task runs at a time. After two additional unavailable
+checks, a verified Bag restore releases the lock; new arrivals take priority over
+the newest waiting request still within ten seconds. Finding target stock protects
+the page from all automatic return/unlock; only tasks without stock expire after
+60 seconds. See the [shared execution policy](docs/pickup-execution-policy.md) and
+[deployment/unlock notes](docs/chrome-first-arrival-2026-10-27.md).
+
 Python 3.9+ standard-library monitor for Apple US store pickup.
 
 ## Split pickup response (Mac mini → Mac)

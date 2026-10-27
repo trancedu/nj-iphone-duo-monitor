@@ -4,11 +4,14 @@ import {chromium} from 'playwright';
 import {Stop} from '../protocol.mjs';
 import {safariDOM} from '../safari/dom.mjs';
 import {handoffActivity} from '../safari/idle.mjs';
+import {pickupLocationDOM} from '../pickup_location.mjs';
 import {prepareSafari,SafariWindow} from '../safari/shopping.mjs';
 const url='https://www.apple.com/shop/buy-iphone/iphone-18-pro/6.3-inch-display-256gb-burgundy-unlocked';
 const product='iPhone 18 Pro 256GB Burgundy';
+// Keep the fixture's 10 a.m. slots in the future regardless of test-run time.
+const pickupDate=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'long',day:'numeric'}).format(new Date(Date.now()+86400000)).replace(/\s/g,'').toLowerCase();
 const config={pickup_zip:'07094',pickup_unavailable_retries:1,pickup_retry_interval_ms:1000,pickup_details:{store_name:'Apple Test Store',first_name:'Test',last_name:'User',email:'test@example.com',phone:'2025550123',preferred_slot:2,min_lead_minutes:0}};
-async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarget=false}={}) {
+async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarget=false,wrongLocation=false}={}) {
  const chrome=await chromium.launch({channel:'chrome',headless:true});t.after(()=>chrome.close());
  const page=await chrome.newPage();let bag=existing,adds=0,checks=0,forbidden=0;
  await page.route('**/*',async route=>{
@@ -17,13 +20,14 @@ async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarg
   else if(path===new URL(url).pathname)body=`<p>${product}</p><label><input type="radio" name="care">No AppleCare coverage</label><button onclick="location.href='/added'">Add to Bag</button>`;
   else if(path==='/added'){adds++;bag=true;body='<button onclick="location.href=\'/shop/bag\'">Review Bag</button>';}
   else if(path==='/checkout'){
-   checks++;body=`<label><input type="radio">I’ll pick it up</label><fieldset><legend>Select your pickup store:</legend>${hiddenTarget?Array.from({length:5},(_,i)=>`<label><input type="radio" disabled>Apple Other ${i} unavailable</label>`).join('')+'<div id="extra-stores" hidden>':''}<label><input id="store-target" type="radio" name="store" ${checks<availableAfter?'disabled':''}>Apple Test Store Available Today</label>${hiddenTarget?'</div><a href="#" onclick="event.preventDefault();document.getElementById(\'extra-stores\').hidden=false;this.remove()">Show more stores</a>':''}<label><input type="radio" name="date" checked>october27</label><select id="checkout.fulfillment.pickupTab.pickup.timeSlot.dateTimeSlots.timeSlotValue"><option value="1">10:00 a.m. – 10:15 a.m.</option><option value="2">10:15 a.m. – 10:30 a.m.</option></select></fieldset><button onclick="location.href='/details'">Continue to Pickup Details</button>`;
+   checks++;body=`<button>07094</button><label><input type="radio">I’ll pick it up</label><fieldset><legend>Select your pickup store:</legend>${hiddenTarget?Array.from({length:5},(_,i)=>`<label><input type="radio" disabled>Apple Other ${i} unavailable</label>`).join('')+'<div id="extra-stores" hidden>':''}<label><input id="store-target" type="radio" name="store" ${checks<availableAfter?'disabled':''}>Apple Test Store Available Today</label>${hiddenTarget?'</div><a href="#" onclick="event.preventDefault();document.getElementById(\'extra-stores\').hidden=false;this.remove()">Show more stores</a>':''}<label><input type="radio" name="date" checked>${pickupDate}</label><select id="checkout.fulfillment.pickupTab.pickup.timeSlot.dateTimeSlots.timeSlotValue"><option value="1">10:00 a.m. – 10:15 a.m.</option><option value="2">10:15 a.m. – 10:30 a.m.</option></select></fieldset><button onclick="location.href='/details'">Continue to Pickup Details</button>`;
   } else if(path==='/details')body=`<h1>Now fill out your pickup information.</h1><label><input type="radio" checked>I’ll pick it up</label>${['First Name','Last Name','Email Address','Phone Number'].map(label=>`<label>${label}<input></label>`).join('')}<button id="co-options-applePay" onclick="location.href='/payment'">Continue with Apple Pay</button>`;
   else{forbidden++;body='<h1>Forbidden</h1>';}
+  if(path==='/checkout'&&wrongLocation)body=body.replace('<button>07094</button>',`<button onclick="document.getElementById('zip-editor').hidden=false;this.hidden=true">East Rutherford, NJ</button><div id="zip-editor" hidden><label>Zip Code or City, State<input role="combobox" value="East Rutherford, NJ"></label><button onclick="window.zipApplied=(window.zipApplied||0)+1;document.getElementById('store-target').disabled=false">Apply</button></div>`);
   await route.fulfill({contentType:'text/html; charset=utf-8',body});
  });
  await page.goto('https://www.apple.com/shop/bag');
- const window={call:async(op,args)=>{try{return await page.evaluate(['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM,{op,args});}catch(e){if(e.message.includes('Execution context was destroyed')){e.code='safari_navigation_pending';}throw e;}},goto:url=>page.goto(url),reload:()=>page.reload(),foreground:async()=>{}};
+ const window={call:async(op,args)=>{try{if(['locationState','openLocation'].includes(op))return await page.evaluate(pickupLocationDOM,{open:op==='openLocation'});return await page.evaluate(['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM,{op,args});}catch(e){if(e.message.includes('Execution context was destroyed')){e.code='safari_navigation_pending';}throw e;}},goto:url=>page.goto(url),reload:()=>page.reload(),foreground:async()=>{}};
  return {window,page,counts:()=>({adds,checks,forbidden})};
 }
 test('Safari test path seeds once, picks second time, verifies contact and stops before final Pay',async t=>{
@@ -147,9 +151,10 @@ test('expanding stores waits for asynchronously inserted target before judging i
  const result=await prepareSafari(f.window,url,{...config,step_timeout_ms:1500,pickup_details:{...config.pickup_details,store_name:'Apple Missing Store'}},{stage:(name,detail)=>{if(detail)observations.push(detail);}});
  assert.equal(result.status,'awaiting_user');assert.ok(observations.some(d=>d.phase==='after_expansion'&&d.verdict==='target_store_selectable'));assert.equal(f.counts().checks,1);assert.equal(f.counts().forbidden,0);
 });
-test('ten unavailable retries perform eleven checks and never enter payment',async t=>{
+test('default two unavailable retries perform three checks and never enter payment',async t=>{
  const f=await fixture(t,{existing:true,availableAfter:99});let reloads=0;const reload=f.window.reload;f.window.reload=()=>{reloads++;return reload();};
- const result=await prepareSafari(f.window,url,{...config,pickup_unavailable_retries:10});assert.equal(result.status,'pickup_unavailable');assert.equal(result.checks,11);assert.equal(reloads,10);assert.deepEqual(f.counts(),{adds:0,checks:11,forbidden:0});
+ const {pickup_unavailable_retries,...defaults}=config;
+ const result=await prepareSafari(f.window,url,defaults);assert.equal(result.status,'pickup_unavailable');assert.equal(result.checks,3);assert.equal(reloads,2);assert.deepEqual(f.counts(),{adds:0,checks:3,forbidden:0});
 });
 test('production idle observer is armed before foreground handoff and does not click payment',async t=>{
  const f=await fixture(t,{existing:true});let seen;
@@ -164,4 +169,10 @@ test('stock lost while revealing store preserves the pickup page rather than ref
  const f=await fixture(t,{existing:true,hiddenTarget:true});const call=f.window.call;let reloads=0;
  f.window.call=async(op,args)=>{const r=await call(op,args);if(op==='moreStores')await f.page.locator('#store-target').evaluate(e=>{e.disabled=true;});return r;};f.window.reload=()=>{reloads++;};
  await assert.rejects(()=>prepareSafari(f.window,url,config),e=>e.code==='target_store_changed_after_expansion');assert.equal(reloads,0);assert.equal(new URL(f.page.url()).pathname,'/checkout');assert.equal(f.counts().forbidden,0);
+});
+
+test('wrong city location is corrected once before unavailable verdict, then preserves newly available stock',async t=>{
+ const f=await fixture(t,{existing:true,availableAfter:99,wrongLocation:true});let reloads=0;f.window.reload=()=>{reloads++;};const stages=[];
+ const result=await prepareSafari(f.window,url,config,{stage:s=>stages.push(s)});
+ assert.equal(result.status,'awaiting_user');assert.equal(stages.filter(s=>s==='pickup_location_corrected_at').length,1);assert.ok(stages.includes('pickup_stock_found_at'));assert.equal(reloads,0);assert.equal(f.counts().forbidden,0);
 });

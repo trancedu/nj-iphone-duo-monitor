@@ -1,5 +1,15 @@
 # Safari production handoff — 2026-10-26
 
+> 当前规则已更新：最多额外刷新2次；明确无货回袋后提前解锁；优先新请求，否则补跑10秒内最新候选；有货页面永不自动回袋/解锁。详见[最新执行策略](pickup-execution-policy.md)。下文旧策略描述保留为历史记录。
+
+Current policy update (2026-10-27): the Safari standby bundle now uses the same
+first-arrival global lock, 60-second trigger deadline and maximum **three additional
+refreshes** as Chrome. See the [shared execution policy](pickup-execution-policy.md).
+Production has now switched back to Safari; Chrome reception is stopped and its
+windows are preserved. Both backends retain the same policy for future switches.
+The older parallel, queue, idle-return and ten-refresh descriptions below are
+historical and are disabled by this policy.
+
 The user authorized Safari production activation. The existing authenticated
 receiver at `192.168.31.35:8765/prepare` now routes to Safari. Mini's endpoint,
 shared secret, allowlist and event format are unchanged. There is one production

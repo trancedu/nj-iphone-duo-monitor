@@ -1,5 +1,9 @@
 # Mac 接收与浏览器程序
 
+当前正式策略以[首条独占、60秒释放说明](../docs/pickup-execution-policy.md)为准：
+Chrome/Safari 共用全局首条锁，后续请求不排队、不补跑，最多额外刷新3次；
+触发满60秒后仅清理该任务所在的 Profile。历史的独立队列和闲置返回行为不在此模式启用。
+
 这是**接手购买的 Mac**运行的程序。Mac mini 只监控库存、发 Telegram 和 LAN 事件。完整部署、验收命令和另一位 AI 的测试清单在 [两机部署说明](../docs/split-pickup-deployment.md)。
 
 依赖 Node.js 22+、Google Chrome、已登录的 macOS 图形会话。`npm ci` 安装锁定版本的 Playwright。Chrome 使用 `apple-browser-profile/`，不使用日常配置目录。首次登录、Apple Pay / Touch ID 可用性必须在这套专用浏览器中手动验证。
