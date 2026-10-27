@@ -21,7 +21,10 @@ monitoring and pickup preparation to that ZIP. To return to the present defaults
 remove the variable and restart both services. The variable has not been set in
 the live environment, so the current New York-area configuration is unchanged.
 
-The current monitor configuration contains two ZIPs, `07078` and `11530`.
+The legacy monitor configuration contains two ZIPs, `07078` and `11530`.
+The active proxy LaunchAgent instead uses one ZIP, `07094` (12 stores), unless
+`APPLE_PICKUP_ZIP` overrides it. Both polling entry points attach the query ZIP
+to new stock events; restart the Mini process to load code or environment changes.
 The receiver's fallback pickup ZIP remains `07094`. New monitor events carry
 their source ZIP so the checkout form can use the matching region.
 

@@ -203,13 +203,19 @@ def record_result(state, ip, now, error=None, cooldown=300):
 
 
 def parse_offers(raw, products, config, zipcode):
-    region = {'zip': zipcode, 'expected_stores': EXPECTED_07094 if zipcode == '07094' else []}
+    override = m.environment_region()
+    dynamic = override is not None and override['zip'] == zipcode
+    region = override if dynamic else {'zip': zipcode, 'expected_stores': EXPECTED_07094 if zipcode == '07094' else []}
+    watched = None if dynamic else config['stores']
     today = dt.datetime.now(m.TZ).date()
-    payloads = m.regional_payloads(raw, products, config['stores'], region, today)
+    payloads = m.regional_payloads(raw, products, watched, region, today)
     offers = []
     for sku, payload in payloads.items():
         found, _ = m.parse_inventory(payload, {sku: products[sku]}, today,
-                                    config['max_pickup_days'], config['stores'])
+                                    config['max_pickup_days'], watched,
+                                    allowed_states=None if dynamic else ('NJ', 'NY'))
+        for offer in found:
+            offer['pickup_zip'] = zipcode
         offers.extend(found)
     return offers
 
@@ -235,6 +241,9 @@ def run(args):
     urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler({})))
     if args.env_file.exists():
         m.load_env(args.env_file)
+    override = m.environment_region()
+    if override:
+        args.zip = override['zip']
     config = json.loads((m.ROOT / 'config.json').read_text())
     config['auto_open_product_page'] = False
     selected = m.select_products(config)

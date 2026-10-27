@@ -14,6 +14,51 @@ import proxy_monitor as p
 
 
 class ProxyMonitorTests(unittest.TestCase):
+    def test_environment_zip_from_env_file_reaches_actual_proxy_request(self):
+        config = json.loads((m.ROOT / 'config.json').read_text())
+        calls = []
+        class FakeClient:
+            def inventory_region(self, products, zipcode):
+                calls.append(zipcode)
+                return {'body': {'location': zipcode, 'stores': [{
+                    'storeNumber': 'R-CA', 'storeName': 'California test', 'state': 'CA',
+                    'partsAvailability': {sku: {'pickupDisplay': 'unavailable',
+                        'messageTypes': {'regular': {'storeSelectionEnabled': False}}} for sku in products}}]}}
+        row = {'node': 'test', 'ip': 'test-ip', 'client': FakeClient(), 'probe_seconds': .1}
+        @contextmanager
+        def private(*args): yield [row]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'config.json').write_text(json.dumps(config))
+            env = root/'test.env';env.write_text('APPLE_PICKUP_ZIP=94596\n')
+            args = argparse.Namespace(duration=.03, max_nodes=60, workers=1, spacing=2,
+                min_ip_interval=60, cooldown=300, zip='07094', env_file=env,
+                clash_config=root/'config.yaml', mihomo='unused')
+            with patch.object(m, 'ROOT', root), patch.object(p, 'private_proxy', private), \
+                 patch.object(p, 'discover_pool', return_value=[row]), patch.object(p.signal, 'signal'), \
+                 patch.dict(p.os.environ, {}, clear=True), patch('builtins.print'):
+                p.run(args)
+            report = json.loads((root/'runtime/proxy-monitor/current.json').read_text())
+        self.assertEqual(calls, ['94596'])
+        self.assertEqual(report['zip'], '94596')
+        self.assertEqual(report['counts'], {'http_200': 1})
+
+    def test_proxy_offer_carries_query_zip_for_receiver(self):
+        config = json.loads((m.ROOT / 'config.json').read_text())
+        products = m.select_products(config)
+        raw = {'body': {'location': '94596', 'stores': [{
+            'storeNumber': 'R-CA', 'storeName': 'California test', 'state': 'CA',
+            'partsAvailability': {sku: {'pickupDisplay': 'available', 'pickupSearchQuote': 'Available Today',
+                'messageTypes': {'regular': {'storeSelectionEnabled': True, 'storePickupQuote': 'Today at Apple'}}}
+                for sku in products}}]}}
+        with patch.dict(p.os.environ, {'APPLE_PICKUP_ZIP': '94596'}):
+            offers = p.parse_offers(raw, products, config, '94596')
+        self.assertEqual(len(offers), 4)
+        self.assertEqual({o['pickup_zip'] for o in offers}, {'94596'})
+        self.assertEqual({o['state'] for o in offers}, {'CA'})
+        with patch.dict(p.os.environ, {}, clear=True):
+            with self.assertRaises(m.QueryError): p.parse_offers(raw, products, config, '94596')
+
     def test_subscription_merge_namespaces_nodes_and_ignores_expiry_rows(self):
         a = {'proxies': [{'name': 'US shared', 'type': 'ss', 'server': 'one'},
                          {'name': '剩余流量：10 GB', 'type': 'ss'}]}
