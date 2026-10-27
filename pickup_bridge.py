@@ -96,7 +96,8 @@ class Bridge:
                 return prior[0]
             event_id = uuid.uuid4().hex
             payload = {'event_id': event_id, 'detected_at': offer['observed_at'], 'product_url': offer['url'],
-                       'store_id': offer.get('store_id'), 'store_name': offer.get('store')}
+                       'store_id': offer.get('store_id'), 'store_name': offer.get('store'),
+                       'pickup_zip': offer.get('pickup_zip')}
             c.execute('INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)',
                       (event_id, dedup, now, json.dumps(payload), 'pending', 0, now, now+180, ''))
         self.log(event_id, phase='queued', detected_at=payload['detected_at'])

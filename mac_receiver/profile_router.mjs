@@ -18,13 +18,27 @@ export class ProfileRouter {
   async beforeAccept(event){
     const slot=this.slotForEvent(event.event_id)||this.slotForURL(event.product_url);
     if(!slot)throw new Stop('unsupported_product_url');
+    if(this.config.browser_backend==='safari'){
+      slot.browser.requestReservations=(slot.browser.requestReservations||0)+1;
+      slot.browser.requestReservationsByEvent||=new Map();
+      slot.browser.requestReservationsByEvent.set(event.event_id,(slot.browser.requestReservationsByEvent.get(event.event_id)||0)+1);
+    }
+    if(slot.browser.idleRefreshPromise)return;
     if(!slot.engine.state.active&&(this.config.browser_backend==='safari'||!slot.browser.ready())&&slot.browser.ensurePage)try{await slot.browser.ensurePage();}catch{}
   }
   accept(event){
     const slot=this.slotForEvent(event.event_id)||this.slotForURL(event.product_url);
     if(!slot)throw new Stop('unsupported_product_url');
-    const result=slot.engine.accept(event);
-    return {...result,body:{...result.body,profile_label:slot.label,product:expectedProduct(event.product_url)}};
+    try{
+      const result=slot.engine.accept(event);
+      return {...result,body:{...result.body,profile_label:slot.label,product:expectedProduct(event.product_url)}};
+    }finally{
+      if(this.config.browser_backend==='safari'&&slot.browser.requestReservationsByEvent?.has(event.event_id)){
+        const count=slot.browser.requestReservationsByEvent.get(event.event_id)-1;
+        if(count)slot.browser.requestReservationsByEvent.set(event.event_id,count);else slot.browser.requestReservationsByEvent.delete(event.event_id);
+        slot.browser.requestReservations=Math.max(0,(slot.browser.requestReservations||0)-1);
+      }
+    }
   }
   public(item){const slot=this.slotForEvent(item.event_id);return {...slot.engine.public(item),profile_label:slot.label,product:expectedProduct(item.product_url)};}
   reset(id){const slot=this.slotForEvent(id);return this.config.browser_backend==='safari'?this.resetSafari(slot,id):slot?.engine.reset(id)||false;}
@@ -49,6 +63,11 @@ export async function main() {
   if(!cfg.dry_run&&cfg.selectors_verified!==true)throw new Stop('verify_selectors_before_live');
   const secret=process.env[cfg.secret_env||'PICKUP_SHARED_SECRET'];if(!secret||secret.length<32)throw new Stop('secret_too_short');
   if(cfg.handoff_idle_timeout_seconds!==undefined&&(!Number.isInteger(cfg.handoff_idle_timeout_seconds)||cfg.handoff_idle_timeout_seconds<0||cfg.handoff_idle_timeout_seconds>86400))throw new Stop('invalid_handoff_idle_timeout');
+  const zipOverride=process.env.APPLE_PICKUP_ZIP;
+  if(zipOverride!==undefined){if(!/^\d{5}$/.test(zipOverride))throw new Stop('invalid_pickup_zip');cfg.pickup_zip=zipOverride;}
+  if(cfg.pickup_zip!==undefined&&!/^\d{5}$/.test(cfg.pickup_zip))throw new Stop('invalid_pickup_zip');
+  if(cfg.idle_bag_refresh_interval_seconds===undefined)cfg.idle_bag_refresh_interval_seconds=300;
+  if(!Number.isInteger(cfg.idle_bag_refresh_interval_seconds)||cfg.idle_bag_refresh_interval_seconds<0||cfg.idle_bag_refresh_interval_seconds>86400)throw new Stop('invalid_idle_bag_refresh_interval');
   if(!['chrome','safari'].includes(cfg.browser_backend||'chrome'))throw new Stop('invalid_browser_backend');
   const paths=[];let server,local,pollTimer;
   function lock(dir){
@@ -68,7 +87,7 @@ export async function main() {
       const browser=cfg.browser_backend==='safari'?new SafariPickupBrowser(c):new PickupBrowser(c);await browser.start();const engine=new Engine(c,browser);slots.push({...s,browser,engine});
     }
     const router=new ProfileRouter(cfg,slots);
-    if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());for(const slot of slots)await slot.engine.watchIdle();}catch{}finally{polling=false;}},2000);pollTimer.unref();}
+    if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());for(const slot of slots){if(!slot.engine.state.active&&!slot.engine.releasing&&!slot.engine.signaling)slot.browser.refreshIdleBag?.().catch(()=>{});await slot.engine.watchIdle();}}catch{}finally{polling=false;}},2000);pollTimer.unref();}
     ({server}=createReceiver(cfg,{ready:()=>true},secret,router));
     await new Promise((ok,bad)=>{server.once('error',bad);server.listen(cfg.port,cfg.host,ok);});
     if(!cfg.host.startsWith('127.')){local=http.createServer(server.listeners('request')[0]);local.requestTimeout=5000;local.headersTimeout=5000;local.timeout=5000;await new Promise((ok,bad)=>{local.once('error',bad);local.listen(cfg.port,'127.0.0.1',ok);});}

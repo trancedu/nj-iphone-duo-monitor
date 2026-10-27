@@ -43,9 +43,9 @@ export class SafariWindow {
   async reload(){await appleScript(this.script('do JavaScript "location.reload()" in tab 1 of w'));}
   async foreground(){await appleScript(this.script('set index of w to 1\nactivate'));}
 }
-export async function waitFor(fn,timeout=20000) {
+export async function waitFor(fn,timeout=20000,interval=100) {
   const start=Date.now();
-  do {try{const value=await fn();if(value)return value;}catch(e){if(!['safari_navigation_pending','safari_apple_event_failed','safari_script_response_unrecognized'].includes(e.code))throw e;}await pause(100);}while(Date.now()-start<timeout);
+  do {try{const value=await fn();if(value)return value;}catch(e){if(!['safari_navigation_pending','safari_apple_event_failed','safari_script_response_unrecognized'].includes(e.code))throw e;}await pause(interval);}while(Date.now()-start<timeout);
   throw new Stop('safari_step_timeout');
 }
 export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>{}}={}) {
@@ -152,6 +152,7 @@ async function main() {
   }
   const action=argv[0];if(!['inspect','seed','prepare','release'].includes(action)||!argv.includes('--window-id')||!argv.includes('--profile')||!argv.includes('--config')||!argv.includes('--url'))throw new Stop('usage_safari_shopping_action_window_profile_config_url');
   const configFile=resolve(value('--config')),config=JSON.parse(readFileSync(configFile));
+  if(process.env.APPLE_PICKUP_ZIP!==undefined){if(!/^\d{5}$/.test(process.env.APPLE_PICKUP_ZIP))throw new Stop('invalid_pickup_zip');config.pickup_zip=process.env.APPLE_PICKUP_ZIP;}
   const url=productURL(value('--url'));const window=new SafariWindow(Number(value('--window-id')),value('--profile'));
   const dir=resolve(dirname(configFile),config.safari_test_state_dir||'runtime-safari');mkdirSync(dir,{recursive:true,mode:0o700});
   const lock=join(dir,'profile-'+createHash('sha256').update(window.profile).digest('hex').slice(0,16)+'.lock');let fd;

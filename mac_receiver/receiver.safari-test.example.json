@@ -13,5 +13,6 @@
     "email": "test@example.com",
     "phone": "2025550123"
   },
-  "handoff_idle_timeout_seconds": 600
+  "handoff_idle_timeout_seconds": 600,
+  "idle_bag_refresh_interval_seconds": 300
 }

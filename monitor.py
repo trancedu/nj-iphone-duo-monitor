@@ -64,7 +64,7 @@ def pickup_date(quote, today):
         except ValueError: pass
     return max(dates) if dates else None
 
-def parse_inventory(payload, products, today, max_days=3, requested_stores=None):
+def parse_inventory(payload, products, today, max_days=3, requested_stores=None, allowed_states=('NJ', 'NY')):
     try: records = payload['body']['content']
     except (KeyError, TypeError): raise QueryError('invalid_pickup_schema')
     if not isinstance(records, list) or not records:
@@ -79,7 +79,10 @@ def parse_inventory(payload, products, today, max_days=3, requested_stores=None)
             raise QueryError('unexpected_store_response')
         seen.add(sid)
         state = item.get('state', '')
-        if state not in ('NJ', 'NY'): continue
+        if allowed_states is not None:
+            if state not in allowed_states: continue
+        elif not re.fullmatch(r'[A-Z]{2}', state):
+            raise QueryError('invalid_store_state')
         if not isinstance(item.get('storeSelectionEnabled'), bool):
             raise QueryError('missing_availability_flag')
         observed += 1
@@ -100,7 +103,7 @@ def parse_inventory(payload, products, today, max_days=3, requested_stores=None)
                        'store':item.get('address',{}).get('address',sid),
                        'store_id':sid,'state':state,'date':date.isoformat(),
                        'quote':' / '.join(q for q in quotes if q)})
-    if not observed: raise QueryError('no_nj_ny_observations')
+    if not observed: raise QueryError('no_requested_state_observations' if allowed_states is None else 'no_nj_ny_observations')
     return sorted(offers,key=lambda x:(x['date'],x['state'] != 'NJ',x['store'])), observed
 
 class Client:
@@ -267,9 +270,12 @@ def regional_payloads(payload, products, watched, region, today):
     result={sku:{'body':{'content':[]}} for sku in products}
     for row in rows:
         sid=row['storeNumber']
-        if sid not in watched: continue
+        if watched is not None and sid not in watched: continue
         state=row.get('state',row.get('address',{}).get('state'))
-        if state not in ('NJ','NY'): raise QueryError('wrong_store_state')
+        if region.get('dynamic'):
+            if not isinstance(state,str) or not re.fullmatch(r'[A-Z]{2}',state): raise QueryError('invalid_store_state')
+        elif state not in ('NJ','NY'):
+            raise QueryError('wrong_store_state')
         for sku in products:
             part=row.get('partsAvailability',{}).get(sku)
             if not isinstance(part,dict): raise QueryError('missing_sku_in_regional_response')
@@ -305,7 +311,14 @@ def run_cycle(client, config, state, runtime, dry_run=False):
     if config.get('regions'):
         regions=select_regions(config,state)
         batches=[(region['zip'],products,region) for region in regions]
+        extra_zip=os.environ.get('APPLE_PICKUP_ZIP','').strip()
+        if extra_zip:
+            if not re.fullmatch(r'\d{5}',extra_zip): raise QueryError('invalid_pickup_zip')
+            if extra_zip not in {region['zip'] for region in regions}:
+                extra={'name':'environment-zip','zip':extra_zip,'tier':'optional','dynamic':True}
+                batches.append((extra_zip,products,extra))
         state['regions_checked']=[r['zip'] for r in regions]
+        if len(batches)>len(regions): state['regions_checked'].append(extra_zip)
         state['endpoint']='/shop/retail/pickup-message'
     else:
         batches=[(sku,{sku:product},None) for sku,product in products.items()]
@@ -317,12 +330,17 @@ def run_cycle(client, config, state, runtime, dry_run=False):
             if region:
                 raw=client.inventory_region(batch_products,region['zip'])
                 atomic_json(runtime/('region-'+region['zip']+'.json'),raw)
-                payloads=regional_payloads(raw,batch_products,config['stores'],region,today)
+                watched=None if region.get('dynamic') else config['stores']
+                payloads=regional_payloads(raw,batch_products,watched,region,today)
             else:
                 sku=next(iter(batch_products))
                 payloads={sku:client.inventory(sku,config['stores'])}
             for sku,payload in payloads.items():
-                offers,observed=parse_inventory(payload,{sku:products[sku]},today,config['max_pickup_days'],config['stores'])
+                requested_stores=None if region and region.get('dynamic') else config['stores']
+                allowed_states=None if region and region.get('dynamic') else ('NJ','NY')
+                offers,observed=parse_inventory(payload,{sku:products[sku]},today,config['max_pickup_days'],requested_stores,allowed_states)
+                if region:
+                    for offer in offers: offer['pickup_zip']=region['zip']
                 checked=time.time()
                 for record in payload['body']['content']:
                     sid=record['storeId'];records_by_sku[sku][sid]=record
@@ -337,12 +355,21 @@ def run_cycle(client, config, state, runtime, dry_run=False):
                     all_offers[offer_key(offer)]=offer
                     notify_offer(offer,config,state,runtime,dry_run,opened)
             if region:
+                observed_ids={r['storeNumber'] for r in raw['body']['stores']}
+                if not region.get('dynamic'): observed_ids &= set(config['stores'])
                 state.setdefault('coverage_by_region',{})[region['zip']]={
                     'checked_at':time.time(),'skus':list(batch_products),
-                    'returned_stores':sorted({r['storeNumber'] for r in raw['body']['stores']} & set(config['stores']))}
+                    'returned_stores':sorted(observed_ids)}
+                if region.get('dynamic'):
+                    state.setdefault('optional_region_status',{})[region['zip']]={'checked_at':time.time(),'status':'healthy'}
         except QueryError as exc:
             # Notification failures are retried by the outer handler; do not mark as sold out.
             if exc.code.startswith('telegram_'): raise
+            if region and region.get('dynamic'):
+                state.setdefault('optional_region_status',{})[region['zip']]={
+                    'checked_at':time.time(),'status':'degraded','error':exc.code}
+                LOG.warning('optional ZIP query failed (%s): %s',region['zip'],exc.code)
+                continue
             errors.append(exc)
             break
     state['fresh_coverage_counts']={sku:sum(time.time()-entry['checked_at'] <= 600 for entry in stores.values())

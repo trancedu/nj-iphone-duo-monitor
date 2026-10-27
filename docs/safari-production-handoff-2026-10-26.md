@@ -144,3 +144,12 @@ Current reminders use louder system output (set once from 38% to 70%), three
 Sosumi tones plus Chinese product speech for a ready handoff, and two Ping tones
 for unavailable pickup. See [attention alert behavior](safari-alerts.md). Historical
 sound names in earlier test records describe the versions actually tested then.
+
+## Five-minute idle bag refresh
+
+Each idle profile refreshes no more often than every 300 seconds, and only after
+the receiver confirms the exact prepared product at quantity one on Apple's Bag
+page. Active events, queued requests, checkout pages, and manual-review pages
+are protected. The receiver records successful and failed refresh attempts.
+See [ZIP selection and idle bag refresh](zip-and-idle-bag-refresh.md) for the
+optional `APPLE_PICKUP_ZIP` behavior and California test setup.

@@ -56,6 +56,7 @@ export async function main(argv=process.argv.slice(2)) {
   const i=argv.indexOf('--config');
   if(i<0||!argv[i+1]) throw new Stop('config_required');
   const file=resolve(argv[i+1]),config=JSON.parse(readFileSync(file,'utf8'));
+  if(process.env.APPLE_PICKUP_ZIP!==undefined){if(!/^\d{5}$/.test(process.env.APPLE_PICKUP_ZIP))throw new Stop('invalid_pickup_zip');config.pickup_zip=process.env.APPLE_PICKUP_ZIP;}
   for(const key of ['state_dir','profile_dir']) config[key]=resolve(dirname(file),config[key]);
   if(!privateIPv4(config.host)||!Number.isInteger(config.port)||config.port<1024||config.port>65535||
      !Array.isArray(config.allowed_sources)||!config.allowed_sources.length||

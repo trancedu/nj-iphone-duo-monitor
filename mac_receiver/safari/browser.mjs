@@ -4,7 +4,7 @@ import {signalSafari} from './feedback.mjs';
 import {Stop,expectedProduct} from '../protocol.mjs';
 export class SafariPickupBrowser {
   constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,signal=signalSafari}={}) {
-    this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=prepare;this.signal=signal;this.connected=false;this.page=null;
+    this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=prepare;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
   }
   ready(){return this.connected&&!!this.page&&!this.page.closed;}
   async start(){await this.ensurePage();}
@@ -15,7 +15,7 @@ export class SafariPickupBrowser {
       const w=matches[0];if(w.tabs!==1)throw new Stop('safari_single_test_tab_required');
       const window=new this.Window(w.id,this.config.safari_profile);
       await window.call('snapshot');
-      if(this.page?.id!==w.id)this.page={id:w.id,closed:false};
+      if(this.page?.id!==w.id){this.page={id:w.id,closed:false};this.lastIdleRefreshAt=Date.now();}
       this.window=window;this.connected=true;
     }catch(e){this.connected=false;throw e;}
   }
@@ -27,8 +27,10 @@ export class SafariPickupBrowser {
     });
   }
   async prepare(event,stage){
+    if(this.idleRefreshPromise)await this.idleRefreshPromise.catch(()=>{});
     await this.ensurePage();
     const cfg={...this.config,handoff_event_id:event.event_id,test_any_available_store:false,pickup_details:{...this.config.pickup_details}};
+    if(event.pickup_zip)cfg.pickup_zip=event.pickup_zip;
     if(event.store_name)cfg.pickup_details.store_name=/^Apple\s/.test(event.store_name)?event.store_name:'Apple '+event.store_name;
     const context={backend:'safari',profile:this.config.safari_profile,window_id:this.window.id,requested_store_name:cfg.pickup_details.store_name,requested_store_id:event.store_id};
     const observe=(name,detail)=>stage(name,detail?{...detail,...context}:undefined);
@@ -46,7 +48,9 @@ export class SafariPickupBrowser {
   }
   async seedIdle(){
     await this.ensurePage();
-    return this.workflow(this.window,this.config.preseeded_product_url,this.config,{seedOnly:true});
+    const result=await this.workflow(this.window,this.config.preseeded_product_url,this.config,{seedOnly:true});
+    this.lastIdleRefreshAt=Date.now();
+    return result;
   }
   async handoff(status,reason){
     if(status==='awaiting_user'&&this.config.handoff_idle_timeout_seconds>0)try{await this.window.call('armIdle',{event_id:this.activeTaskId});}catch{}
@@ -65,6 +69,31 @@ export class SafariPickupBrowser {
   }
   async notifyIdleReturn(item){
     return this.signal(null,{status:'idle_timeout_returned'},{event_id:item.event_id,state_dir:this.config.state_dir,mode:'production',profile:this.config.safari_profile,product:expectedProduct(item.product_url)});
+  }
+
+  refreshIdleBag(now=Date.now()){
+    if(this.idleRefreshPromise)return this.idleRefreshPromise;
+    const seconds=this.config.idle_bag_refresh_interval_seconds??300;
+    if(!seconds||!this.ready()||this.requestReservations||now-this.lastIdleRefreshAt<seconds*1000)return Promise.resolve({status:'skipped'});
+    this.lastIdleRefreshAt=now;
+    const task=this._refreshIdleBag();this.idleRefreshPromise=task;
+    task.finally(()=>{if(this.idleRefreshPromise===task)this.idleRefreshPromise=null;}).catch(()=>{});
+    return task;
+  }
+  async _refreshIdleBag(){
+    const product=expectedProduct(this.config.preseeded_product_url);
+    const valid=s=>{try{return !s.focused&&new URL(s.url).origin==='https://www.apple.com'&&new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete'&&s.bag.length===1&&s.bag[0].title===product&&s.bag[0].quantity==='1';}catch{return false;}};
+    try{
+      const before=await this.window.call('snapshot');
+      if(!valid(before))return {status:'skipped'};
+      await this.window.reload();
+      await waitFor(async()=>{const s=await this.window.call('snapshot');return s.document_time_origin!==before.document_time_origin&&valid(s)?s:null;},this.config.step_timeout_ms||20000,500);
+      console.info(JSON.stringify({event:'idle_bag_refresh',profile:this.config.safari_profile,status:'refreshed',at:new Date().toISOString()}));
+      return {status:'refreshed'};
+    }catch(error){
+      console.info(JSON.stringify({event:'idle_bag_refresh',profile:this.config.safari_profile,status:'failed',reason:error instanceof Stop?error.code:'browser_error',at:new Date().toISOString()}));
+      return {status:'failed'};
+    }
   }
 
 }

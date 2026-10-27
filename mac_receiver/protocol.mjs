@@ -34,6 +34,7 @@ export function validateEvent(raw) {
       event[key] = raw[key];
     }
   }
+  if(raw.pickup_zip!=null){if(typeof raw.pickup_zip!=='string'||!/^[0-9]{5}$/.test(raw.pickup_zip))throw new Stop('invalid_pickup_zip');event.pickup_zip=raw.pickup_zip;}
   return event;
 }
 export function expectedProduct(input) {

@@ -29,7 +29,7 @@ export function safariDOM({op,args={}}) {
   if(all('iframe[src*="captcha"],iframe[title*="CAPTCHA"]').length)fail('captcha_required');
   if(all('h1,h2').some(e=>/^(Sign in|Verify your identity)/i.test(norm(e.textContent))))fail('login_required');
   const productVisible=()=>all('h1,h2,h3,p,[data-autom]').some(e=>norm(e.textContent)===args.product);
-  if(op==='snapshot')return {url:location.href,title:document.title,ready:document.readyState,bag:bag().map(({title,quantity})=>({title,quantity})),radios:all('input[type="radio"]').map(e=>({name:name(e),checked:e.checked,enabled:enabled(e)})),empty:all('h1').some(e=>/Your bag is empty/i.test(e.textContent)),buttons:buttons().map(e=>({id:e.id,name:name(e),enabled:enabled(e)}))};
+  if(op==='snapshot')return {url:location.href,title:document.title,ready:document.readyState,document_time_origin:performance.timeOrigin,focused:document.hasFocus(),bag:bag().map(({title,quantity})=>({title,quantity})),radios:all('input[type="radio"]').map(e=>({name:name(e),checked:e.checked,enabled:enabled(e)})),empty:all('h1').some(e=>/Your bag is empty/i.test(e.textContent)),buttons:buttons().map(e=>({id:e.id,name:name(e),enabled:enabled(e)}))};
   if(op==='productReady')return {ready:productVisible()&&radio(/^No AppleCare coverage(?:\s|$)/).length===1};
   if(op==='configure') {
     if(!productVisible())fail('configuration_mismatch');

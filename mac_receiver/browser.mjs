@@ -132,7 +132,10 @@ export class PickupBrowser {
     return 'same_one';
   }
   async prepare(event,stage) {
-    return preparePickup(this,event,stage);
+    const originalZip=this.config.pickup_zip;
+    if(event.pickup_zip)this.config.pickup_zip=event.pickup_zip;
+    try{return await preparePickup(this,event,stage);}
+    finally{this.config.pickup_zip=originalZip;}
   }
   async seedIdle(url=this.config.preseeded_product_url) {
     if(!url)throw new Stop('preseeded_product_required');
