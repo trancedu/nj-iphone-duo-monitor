@@ -38,6 +38,8 @@ def main():
             plist.unlink()
         return
     if args.provider is None:
+        args.provider = os.environ.get('IPHONE_MONITOR_PROVIDER') or None
+    if args.provider is None:
         if provider_file.exists():args.provider=json.loads(provider_file.read_text())['provider']
         elif plist.exists() and str(ROOT/'dataimpulse_monitor.py') in plistlib.loads(plist.read_bytes()).get('ProgramArguments',[]):args.provider='dataimpulse'
         else:args.provider='clash'
@@ -50,7 +52,7 @@ def main():
     runtime = ROOT / 'runtime/proxy-monitor'
     runtime.mkdir(parents=True, exist_ok=True)
     argv = ['/usr/bin/caffeinate', '-i', sys.executable, str(ROOT / 'proxy_monitor.py'),
-            '--duration', '600' if kind == 'test' else '0', '--max-nodes', '256', '--all-subscriptions', '--workers', '4',
+            '--disable-paid-fallback', '--duration', '600' if kind == 'test' else '0', '--max-nodes', '256', '--all-subscriptions', '--workers', '4',
             '--spacing', '2', '--min-ip-interval', '60', '--cooldown', '300',
             '--zip', '07094', '--env-file', str(args.env_file.resolve()),
             '--clash-config', str(args.clash_config.resolve()), '--mihomo', str(args.mihomo.resolve())]
@@ -72,6 +74,7 @@ def main():
             '--env-file',str(args.env_file.resolve()),'--proxy-env-file',str(args.proxy_env_file.resolve())]
     job = {'Label': label, 'ProgramArguments': argv, 'WorkingDirectory': str(ROOT),
            'RunAtLoad': True, 'KeepAlive': False, 'ProcessType': 'Background',
+           'EnvironmentVariables': {'IPHONE_MONITOR_PROVIDER': args.provider},
            'StandardOutPath': str(runtime / (kind + '.stdout.log')),
            'StandardErrorPath': str(runtime / (kind + '.stderr.log'))}
     if args.provider=='dataimpulse':

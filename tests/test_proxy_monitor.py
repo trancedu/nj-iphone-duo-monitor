@@ -14,6 +14,24 @@ import proxy_monitor as p
 
 
 class ProxyMonitorTests(unittest.TestCase):
+    def test_clash_only_ignores_paid_fallback_environment(self):
+        config = json.loads((m.ROOT / 'config.json').read_text())
+        @contextmanager
+        def private(*args):yield []
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'config.json').write_text(json.dumps(config))
+            args=argparse.Namespace(duration=.01,max_nodes=60,workers=1,spacing=2,
+                max_recovery_per_minute=0,min_ip_interval=60,cooldown=300,zip='07094',
+                env_file=root/'missing.env',clash_config=root/'config.yaml',mihomo='unused',disable_paid_fallback=True)
+            with patch.object(m,'ROOT',root),patch.object(p,'private_proxy',private), \
+                 patch.object(p,'discover_pool',return_value=[]),patch.object(p.signal,'signal'), \
+                 patch.dict(p.os.environ,{'DATAIMPULSE_FALLBACK_CONFIG':'old-paid-config.json'},clear=True), \
+                 patch('dataimpulse_fallback.load_settings') as paid,patch('builtins.print'):
+                p.run(args)
+            paid.assert_not_called()
+            report=json.loads((root/'runtime/proxy-monitor/current.json').read_text())
+            self.assertNotIn('dataimpulse',report)
+
     def test_recovery_budget_coalesces_errors_and_survives_restart(self):
         state = {};recovery = p.RecoveryPacer(state, 2)
         for now in [100, 101]:

@@ -32,6 +32,8 @@ The [read-only stock dashboard](docs/dashboard.md) shows live store/configuratio
 
 ## Current stock monitoring
 
+**Latest manual mode (2026-10-27): Clash subscription pool; DataImpulse is stopped.** Provider selection is manual via `IPHONE_MONITOR_PROVIDER` / `--provider`, with no scheduled switching. Service-managed Clash mode explicitly disables paid fallback. See [manual mode switching](docs/manual-monitor-provider.md). The DataImpulse deployment description immediately below describes the retained paid-mode configuration, not the currently selected source.
+
 Current Mac mini deployment (2026-10-27): **`dataimpulse_monitor.py` is the only live inventory source**, targeting US Rotating exits, ZIP **07094 (12 stores)** and all four 256GB/512GB color combinations. Target dispatch spacing is one second with at most four requests in flight. Telegram, LAN forwarding and stock deduplication are preserved. The old subscription-pool and hybrid trial modes are inactive. See [current DataImpulse-only deployment](docs/dataimpulse-live.md); older proxy/region schedules below are historical modes.
 
 - Production alerts: iPhone Duo only, connect to a carrier later. Every request batches all four 256GB/512GB × Star White/Night Sky configurations; 1TB and 2TB are excluded.

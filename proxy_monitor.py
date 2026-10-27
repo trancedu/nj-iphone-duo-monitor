@@ -287,7 +287,7 @@ def run(args):
     state.setdefault('sent', {})
     recovery = RecoveryPacer(state, getattr(args, 'max_recovery_per_minute', 12))
     fallback, fallback_client, fallback_config = None, None, None
-    fallback_path = os.environ.get('DATAIMPULSE_FALLBACK_CONFIG')
+    fallback_path = None if getattr(args, 'disable_paid_fallback', False) else os.environ.get('DATAIMPULSE_FALLBACK_CONFIG')
     if fallback_path:
         try:
             from dataimpulse_fallback import FreshnessHedge, load_settings
@@ -499,6 +499,7 @@ def main():
     parser.add_argument('--duration', type=int, default=600, help='Polling duration; zero runs until stopped')
     parser.add_argument('--max-nodes', type=int, default=256)
     parser.add_argument('--workers', type=int, default=1, help='Bounded in-flight requests; starts still obey spacing')
+    parser.add_argument('--disable-paid-fallback', action='store_true', help='Ignore paid fallback configuration; Clash-only service mode')
     parser.add_argument('--all-subscriptions', action='store_true', help='Merge all locally cached remote profiles')
     parser.add_argument('--spacing', type=float, default=2)
     parser.add_argument('--max-recovery-per-minute', type=int, default=12,
