@@ -6,6 +6,8 @@ Python 3.9+ standard-library monitor for Apple US store pickup.
 
 See the [current end-to-end flow and Mini–Mac HTTP protocol](docs/current-pickup-flow.md) for polling, Telegram, authenticated LAN delivery, retries, status queries and deduplication. The production Mac receiver routes four products to independent Safari Profiles; its configured workflow prepares pickup details and stops before final Apple Pay authorization. The original [split deployment guide](docs/split-pickup-deployment.md) documents the initial Chrome/dry-run setup. LAN forwarding is opt-in; existing Telegram stock alerts remain independent.
 
+The optional [DataImpulse smoke test](docs/dataimpulse-smoke.md) checks credentials, country targeting and one inventory response with bounded traffic. It does not enable DataImpulse production polling.
+
 ## Current stock monitoring
 
 Current Mac deployment (2026-10-26): `proxy_monitor.py` queries ZIP **07094 (12 stores)** using all three cached subscriptions. Every request includes **all four 256GB/512GB color combinations**. Normal starts are paced two seconds apart. After 541/403/network failures, bounded recovery can immediately use another ready IP (at most 12 extra starts per rolling minute, 0.2-second minimum between starts). At most four requests are in flight, with a 60-second minimum per measured IP and persistent cooldowns. Successful refreshes can take longer than two seconds. The older non-proxy service below remains stopped.
