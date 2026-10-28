@@ -58,3 +58,11 @@
 - 完整回归：315项通过（随后补充诊断细节另跑相关测试）。
 - 实机共用准备路径：测试窗口从过期状态重新准备到Guest Pickup/07094，再刷新到Review约7.33秒；未点击最终下单。
 - 真正付款成功后的清空购物车与自动补车仅做流程/状态机及已有加车逻辑回归，尚无真实购买成功样本；不为测试而额外创建订单。
+
+## 辅助功能与登录页恢复补充
+
+后台曾返回macOS辅助功能错误 `-25211`。它与Safari JavaScript授权、Keychain读取授权不同；交互进程能用不等于LaunchAgent也能用。现将它分类为 `safari_accessibility_permission_required`，而非笼统AppleEvent失败。用户重新启用辅助功能后，相同caffeinate/Node后台身份的只读探针已通过。
+
+另修复启动绑定：Guest自动恢复模式用受限的Apple页面状态读取绑定窗口，允许从Sign In开始恢复；不能先调用会拒绝Sign In的普通snapshot，导致整个接收服务启动失败。
+
+交互式准备通过router state_dir的 `setup-leases/<配置>.json` 临时暂停对应配置的调度和维护，其他配置继续。租约属于实际工作进程PID，结束后移除；PID已退出的残留租约自动清理。此操作不授权重试未决付款。配置C/D通过共用准备函数恢复到Guest Pickup/07094，未提交订单。

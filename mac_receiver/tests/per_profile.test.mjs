@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,mkdirSync,writeFileSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setImmediate as turn,setTimeout as delay} from 'node:timers/promises';
@@ -252,4 +252,12 @@ test('expired startup session preparation does not delay ready configurations',a
  assert.equal(f.slots[0].engine.releasing,true);assert.equal(f.slots[1].engine.releasing,false);
  assert.equal(f.router.accept(f.event('other-ready',1)).body.status,'queued');await turn();assert.deepEqual(f.calls,['other-ready']);
  finish();await task;
+});
+
+test('external setup lease blocks only its configuration and expires when its owner process exits',async t=>{
+ const f=fixture(t);const dir=join(f.router.config.state_dir,'setup-leases');mkdirSync(dir);const file=join(dir,'A.json');writeFileSync(file,JSON.stringify({pid:process.pid}));
+ assert.equal(f.router.externalMaintenance(f.slots[0]),true);assert.equal(f.router.accept(f.event('paused-white')).body.status,'held');
+ assert.equal(f.router.accept(f.event('ready-black',1)).body.status,'queued');await turn();assert.deepEqual(f.calls,['ready-black']);
+ writeFileSync(file,JSON.stringify({pid:2147483647}));assert.equal(f.router.externalMaintenance(f.slots[0]),false);assert.equal(existsSync(file),false);
+ f.router.dispatchProfile(f.slots[0]);await turn();assert.deepEqual(f.calls,['ready-black','paused-white']);
 });

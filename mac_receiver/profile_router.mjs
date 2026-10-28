@@ -23,7 +23,7 @@ export class ProfileRouter {
       this.orderLedger=new OrderLedger(config.state_dir,{limit:config.guest_daily_order_limit});
       for(const slot of slots){
         for(const event of Object.values(slot.engine.state.events))this.orderLedger.importExisting(event);
-        if(Object.values(slot.engine.state.events).some(e=>e.rearm_pending===true||e.status==='automation_paused'))slot.browser.automationBlocked=true;
+        if(slot.engine.state.automation_blocked===true||Object.values(slot.engine.state.events).some(e=>e.rearm_pending===true))slot.browser.automationBlocked=true;
         slot.engine.beforeGuestSubmission=item=>{this.orderLedger.reserve(item);slot.engine.log(item,'daily_order_slot_reserved');};
         slot.engine.onGuestOutcome=(item,outcome)=>{this.orderLedger.settle(item.event_id,outcome);slot.engine.log(item,'order_budget_'+outcome);};
       }
@@ -99,9 +99,13 @@ export class ProfileRouter {
       };
     }
   }
+  externalMaintenance(slot){
+    const file=join(this.config.state_dir,'setup-leases',slot.label+'.json');if(!existsSync(file))return false;
+    try{const lease=JSON.parse(readFileSync(file,'utf8'));if(!Number.isInteger(lease.pid)||lease.pid<2)return true;try{process.kill(lease.pid,0);return true;}catch(error){if(error.code==='ESRCH'){unlinkSync(file);return false;}return true;}}catch{return true;}
+  }
   startStandbyInitialization(){
     if(this.config.standby_page!=='pickup_checkout')return Promise.resolve();
-    const candidates=this.slots.filter(s=>!s.engine.state.active&&!s.browser.automationBlocked&&!this.orderLedger?.unresolved(s.product_url));
+    const candidates=this.slots.filter(s=>!this.externalMaintenance(s)&&!s.engine.state.active&&!s.browser.automationBlocked&&!this.orderLedger?.unresolved(s.product_url));
     for(const slot of candidates){slot.engine.releasing=true;slot.initializing=true;}
     return (async()=>{
       const repairs=[];
@@ -110,13 +114,13 @@ export class ProfileRouter {
       for(const [index,slot] of candidates.entries()){
         let deferred=false;
         try{const result=await slot.browser.seedIdle({allowRebuild:false});if(result.status==='needs_session_setup'){repairs.push({slot,index});deferred=true;}else ready(slot,index,result);}
-        catch(error){console.info(JSON.stringify({event:'standby_checkout_startup',profile:slot.label,status:'failed',reason:safeErrorCode(error,'standby_setup_failed')}));}
+        catch(error){if(error.code==='safari_accessibility_permission_required'){slot.browser.automationBlocked=true;slot.engine.state.automation_blocked=true;slot.engine.save();}console.info(JSON.stringify({event:'standby_checkout_startup',profile:slot.label,status:'failed',reason:safeErrorCode(error,'standby_setup_failed')}));}
         finally{if(!deferred)release(slot);}
       }
       // Healthy slots are already serving stock; only expired sessions wait here.
       for(const {slot,index} of repairs){
         try{ready(slot,index,await slot.browser.seedIdle());}
-        catch(error){console.info(JSON.stringify({event:'standby_checkout_startup',profile:slot.label,status:'failed',reason:safeErrorCode(error,'standby_setup_failed')}));}
+        catch(error){if(error.code==='safari_accessibility_permission_required'){slot.browser.automationBlocked=true;slot.engine.state.automation_blocked=true;slot.engine.save();}console.info(JSON.stringify({event:'standby_checkout_startup',profile:slot.label,status:'failed',reason:safeErrorCode(error,'standby_setup_failed')}));}
         finally{release(slot);}
       }
     })();
@@ -135,7 +139,7 @@ export class ProfileRouter {
     const timer=setTimeout(()=>this.dispatchProfile(slot),100);timer.unref();
   }
   dispatchProfile(slot,nowMs=Date.now()){
-    if(slot.browser.automationBlocked||this.orderLedger&&this.orderLedger.health().remaining<1||this.orderLedger?.unresolved(slot.product_url)||slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent||slot.browser.idleRefreshPromise)return false;
+    if(this.externalMaintenance(slot)||slot.browser.automationBlocked||this.orderLedger&&this.orderLedger.health().remaining<1||this.orderLedger?.unresolved(slot.product_url)||slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent||slot.browser.idleRefreshPromise)return false;
     const next=this.latestRecentCandidate(null,nowMs,slot);if(!next)return false;
     const item=next.item;item.status='queued';delete item.reason;
     item.same_configuration_stall_retry=slot.browser.stalledProfilePending===true;
@@ -231,7 +235,7 @@ export class ProfileRouter {
     if(!slot)throw new Stop('unsupported_product_url');
     if(this.config.per_profile_requests){
       if(slot.reservedEvent===event.event_id){await slot.reservationReady;return;}
-      if(this.slotForEvent(event.event_id)||slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent||slot.browser.idleRefreshPromise)return;
+      if(this.slotForEvent(event.event_id)||this.externalMaintenance(slot)||slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent||slot.browser.idleRefreshPromise)return;
       slot.reservedEvent=event.event_id;
       slot.reservationReady=(async()=>{try{if(slot.browser.ensurePage)await slot.browser.ensurePage();}catch{}})();
       await slot.reservationReady;return;
@@ -278,7 +282,7 @@ export class ProfileRouter {
       if(existing.fingerprint!==fingerprint(event))return {code:409,body:{event_id:event.event_id,status:'event_id_conflict'}};
       this.expireWaiting();return {code:200,body:this.public(existing)};
     }
-    if(this.config.per_profile_requests&&!existing&&(slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.browser.idleRefreshPromise||(slot.reservedEvent&&slot.reservedEvent!==event.event_id)))return this.holdRecent(slot,event);
+    if(this.config.per_profile_requests&&!existing&&(this.externalMaintenance(slot)||slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.browser.idleRefreshPromise||(slot.reservedEvent&&slot.reservedEvent!==event.event_id)))return this.holdRecent(slot,event);
     if(this.blockedGlobally(event))return this.holdRecent(slot,event);
     if(!existing&&this.config.latest_candidate_only&&(Date.now()-Date.parse(event.detected_at)>(this.config.recent_request_ttl_seconds||10)*1000||Date.parse(event.detected_at)>Date.now()+1000)){if(slot.reservedEvent===event.event_id)slot.reservedEvent=null;return this.holdRecent(slot,event);}
     const prior=this.slotForEvent(event.event_id);
@@ -326,6 +330,7 @@ export class ProfileRouter {
         e.state.active=id;e.save();
         if(this.paymentOwner&&this.slotForEvent(this.paymentOwner)===slot){this.paymentOwner=null;this.paymentClaimedAt=null;writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:null,claimed_at:null}),{mode:0o600});}
         await slot.browser.manualRetryToPickup(item);
+        e.state.automation_blocked=false;slot.browser.automationBlocked=false;
         e.stage(item,'manual_retry_pickup_ready_at');
         if(restore_only){item.status='manual_retry_ready';item.release_reason='user_restore_only';e.stage(item,'finished_at');e.reset(id,true);}
         else{item.status='queued';e.save();}
@@ -365,7 +370,7 @@ export class ProfileRouter {
     const start=this.standbyCursor||0;
     for(let offset=0;offset<this.slots.length;offset++){
       const index=(start+offset)%this.slots.length,slot=this.slots[index];
-      if(this.config.per_profile_requests&&(slot.browser.automationBlocked||this.orderLedger?.unresolved(slot.product_url)||slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent))continue;
+      if(this.config.per_profile_requests&&(this.externalMaintenance(slot)||slot.browser.automationBlocked||this.orderLedger?.unresolved(slot.product_url)||slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent))continue;
       if(this.config.per_profile_requests&&this.latestRecentCandidate(null,nowMs,slot)){this.dispatchProfile(slot,nowMs);continue;}
       const engine=slot.engine,item=engine.state.events[engine.state.active];
       // A reserved event not yet in Engine is about to execute. Yield all I/O.
@@ -398,7 +403,7 @@ export class ProfileRouter {
   }
   health(){
     if(this.config.per_profile_requests)this.expirePaymentLease();
-    const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],request_reserved:!!s.reservedEvent,maintenance_in_progress:!!s.browser.idleRefreshPromise||!!s.initializing,checkout_method:s.browser.config?.checkout_method||'apple_pay',guest_payment_prepared:s.browser.config?.guest_payment_prepared===true,guest_auto_place_order:s.browser.config?.guest_auto_place_order===true,...s.engine.health()}));
+    const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],request_reserved:!!s.reservedEvent,maintenance_in_progress:this.externalMaintenance(s)||!!s.browser.idleRefreshPromise||!!s.initializing,checkout_method:s.browser.config?.checkout_method||'apple_pay',guest_payment_prepared:s.browser.config?.guest_payment_prepared===true,guest_auto_place_order:s.browser.config?.guest_auto_place_order===true,...s.engine.health()}));
     this.expireWaiting();
     return {status:'ok',...(this.orderLedger?{order_budget:this.orderLedger.health()}:{}),...(this.config.per_profile_requests?{execution_policy:'per_configuration',global_locked:false,profile_lock_timeout_seconds:this.config.global_lock_timeout_seconds||60,stall_handoff_seconds:this.config.stall_handoff_seconds,payment_panel_owner:this.paymentOwner||null,payment_panel_cooldown_seconds:10,payment_panel_claimed_at:this.paymentOwner?this.paymentClaimedAt:null}:{}),...(this.config.listener_status?{listener_status:this.config.listener_status}:{}),busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.config.protect_stock_from_timeout!==false&&this.stockProtected(),protect_stock_from_timeout:this.config.protect_stock_from_timeout!==false,recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
   }

@@ -122,7 +122,7 @@ export class Engine {
         item.status='pre_submit_failed';item.release_reason=item.reason;this.reset(item.event_id,true);
         if(item.reason!=='daily_order_limit_reached')await this.browser.restoreBeforeGuestSubmit(item);
         this.stage(item,'pre_submit_pickup_restored_at');
-      }catch(error){item.status='automation_paused';item.reason=safeErrorCode(error,'pre_submit_restore_failed');this.browser.automationBlocked=true;this.stage(item,'pre_submit_restore_failed_at',{kind:'guest_recovery',error_code:item.reason});}
+      }catch(error){item.status='automation_paused';item.reason=safeErrorCode(error,'pre_submit_restore_failed');this.browser.automationBlocked=true;this.state.automation_blocked=true;this.stage(item,'pre_submit_restore_failed_at',{kind:'guest_recovery',error_code:item.reason});}
       finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
       return;
     }
@@ -182,7 +182,7 @@ export class Engine {
           item.rearm_pending=false;this.stage(item,'post_order_pickup_ready_at');
         }
         return true;
-      }catch(error){item.status='order_confirmed_rearm_failed';item.reason=safeErrorCode(error,'post_order_setup_failed');this.browser.automationBlocked=true;this.stage(item,'post_order_setup_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
+      }catch(error){item.status='order_confirmed_rearm_failed';item.reason=safeErrorCode(error,'post_order_setup_failed');this.browser.automationBlocked=true;this.state.automation_blocked=true;this.stage(item,'post_order_setup_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
       finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
     }
     if(state.outcome==='failed'&&state.recoverable===true){this.onGuestOutcome?.(item,'failed');return null;}

@@ -116,3 +116,10 @@ test('manual recovery selects pickup when checkout returned to delivery without 
  f.b.ensurePage=async()=>{f.b.window=window;};
  assert.equal((await f.b.manualRetryToPickup({event_id:'manual',product_url:url})).status,'standby_checkout');assert.equal(pickup,true);assert.equal(ops.filter(op=>op==='pickup').length,1);assert.equal(f.b.lastStandbyReady,true);
 });
+
+test('Guest startup can bind a sign-in page for recovery without requiring a checkout snapshot',async()=>{
+ let snapshots=0,reads=0;
+ class Window {constructor(id,profile){this.id=id;this.profile=profile;}async call(){snapshots++;throw Error('login_required');}}
+ const browser=new SafariPickupBrowser({safari_profile:'Duo512White',checkout_method:'guest_credit',guest_auto_rearm:true},{listWindows:async()=>[{id:1666,name:'Duo512White — Sign In',tabs:1}],Window,guestState:async()=>{reads++;return {path:'/shop/signIn',guest:true};}});
+ await browser.start();assert.equal(browser.ready(),true);assert.equal(snapshots,0);assert.equal(reads,1);
+});

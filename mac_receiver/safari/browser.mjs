@@ -8,8 +8,8 @@ import {appendDiagnostic,safeErrorCode} from './diagnostics.mjs';
 import {join} from 'node:path';
 import {Stop,expectedProduct} from '../protocol.mjs';
 export class SafariPickupBrowser {
-  constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,standby=prepareSafariStandby,signal=signalSafari}={}) {
-    this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=config.checkout_method==='guest_credit'?async(w,u,c,opts)=>{const r=await runGuestSignal(w,u,c,c.guest_billing,opts.stage,{mode:c.guest_auto_place_order&&!c.simulation_no_payment?'production':'test',max_total_usd:c.guest_max_total_usd||0,shouldYieldToRecent:opts.shouldYieldToRecent,mayForeground:opts.mayForeground});return {...r,status:r.status==='review_ready_test_stopped'||r.status==='order_requested'||r.status==='order_request_uncertain'?'awaiting_user':r.status};}:prepare;this.standby=config.checkout_method==='guest_credit'?prepareGuestStandby:standby;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
+  constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,standby=prepareSafariStandby,signal=signalSafari,guestState=runGuestDOM}={}) {
+    this.guestStateReader=guestState;this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=config.checkout_method==='guest_credit'?async(w,u,c,opts)=>{const r=await runGuestSignal(w,u,c,c.guest_billing,opts.stage,{mode:c.guest_auto_place_order&&!c.simulation_no_payment?'production':'test',max_total_usd:c.guest_max_total_usd||0,shouldYieldToRecent:opts.shouldYieldToRecent,mayForeground:opts.mayForeground});return {...r,status:r.status==='review_ready_test_stopped'||r.status==='order_requested'||r.status==='order_request_uncertain'?'awaiting_user':r.status};}:prepare;this.standby=config.checkout_method==='guest_credit'?prepareGuestStandby:standby;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
   }
   ready(){return this.connected&&!!this.page&&!this.page.closed;}
   async start(){await this.ensurePage();}
@@ -19,7 +19,8 @@ export class SafariPickupBrowser {
       if(matches.length!==1)throw new Stop(matches.length?'safari_profile_window_ambiguous':'safari_profile_window_missing');
       const w=matches[0];if(w.tabs!==1)throw new Stop('safari_single_test_tab_required');
       const window=new this.Window(w.id,this.config.safari_profile);
-      await window.call('snapshot');
+      if(this.config.checkout_method==='guest_credit'&&this.config.guest_auto_rearm)await this.guestStateReader(window,'state');
+      else await window.call('snapshot');
       if(this.page?.id!==w.id){this.page={id:w.id,closed:false};this.lastIdleRefreshAt=Date.now();}
       this.window=window;this.connected=true;
     }catch(e){this.connected=false;throw e;}
@@ -300,7 +301,7 @@ export class SafariPickupBrowser {
         this.lastSessionCheck.status=recovery?'recovered':'ready';
         console.info(JSON.stringify({event:recovery?'checkout_session_recovery':'idle_checkout_refresh',profile:this.config.safari_profile,status:'refreshed',at:new Date().toISOString()}));
         return result;
-      }catch(error){this.lastSessionCheck={at:new Date(now).toISOString(),status:'failed',reason:safeErrorCode(error)};console.info(JSON.stringify({event:'idle_checkout_refresh',profile:this.config.safari_profile,status:'failed',reason:safeErrorCode(error),at:new Date().toISOString()}));return {status:'failed'};}
+      }catch(error){if(error.code==='safari_accessibility_permission_required')this.automationBlocked=true;this.lastSessionCheck={at:new Date(now).toISOString(),status:'failed',reason:safeErrorCode(error)};console.info(JSON.stringify({event:'idle_checkout_refresh',profile:this.config.safari_profile,status:'failed',reason:safeErrorCode(error),at:new Date().toISOString()}));return {status:'failed'};}
     })();
     this.idleRefreshPromise=task;
     task.finally(()=>{

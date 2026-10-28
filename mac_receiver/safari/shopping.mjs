@@ -20,7 +20,7 @@ export async function appleScript(source) {
     const timer=setTimeout(()=>child.kill(),10000);
     child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>error+=b);
     child.on('error',()=>{clearTimeout(timer);bad(new Stop('safari_apple_events_unavailable'));});
-    child.on('close',code=>{clearTimeout(timer);code===0?ok(output.trim()):bad(new Stop(error.includes('Allow JavaScript')?'safari_javascript_permission_required':error.includes('profile_changed')?'safari_profile_changed':error.includes('single_test_tab_required')?'safari_single_test_tab_required':'safari_apple_event_failed'));});
+    child.on('close',code=>{clearTimeout(timer);code===0?ok(output.trim()):bad(new Stop(error.includes('(-25211)')?'safari_accessibility_permission_required':error.includes('Allow JavaScript')?'safari_javascript_permission_required':error.includes('profile_changed')?'safari_profile_changed':error.includes('single_test_tab_required')?'safari_single_test_tab_required':'safari_apple_event_failed'));});
     child.stdin.end(source);
   });
 }
