@@ -55,6 +55,9 @@ class DashboardTests(unittest.TestCase):
         wave=waves[0]
         self.assertEqual((wave['start'],wave['last_seen'],wave['end']),(100,130,132))
         self.assertEqual(wave['elapsed_seconds'],32)
+        # Visible conservative span excludes the final negative-confirmation delay.
+        self.assertEqual(wave['observed_span_seconds'],30)
+        self.assertEqual([p['observed_span_seconds'] for p in wave['segments']],[10,10])
         self.assertEqual(wave['segment_count'],2);self.assertEqual(wave['brief_unavailable_count'],1)
         self.assertEqual([p['segment_number'] for p in wave['segments']],[1,2])
         self.assertEqual(wave['historical_first_seen'],100)
