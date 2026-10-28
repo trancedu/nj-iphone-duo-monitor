@@ -232,3 +232,30 @@ Safari 的步骤等待报 `safari_step_timeout` 后，读取当前页面。只�
 ### Wi-Fi 切换与本地会话维护
 
 配置的局域网 IP 不在本机时，绑定会报 EADDRNOTAVAIL。接收器启动现保留 127.0.0.1 鉴权监听，使本机 Safari 会话维护不因局域网地址暂缺而退出；每 5 秒仅重试原配置地址，恢复该地址后自动补回局域网监听。所有监听复用相同请求处理器、密钥鉴权及来源白名单，不绑定 0.0.0.0、不自动扩大允许来源。health 的 listener_status 区分本机可用与局域网可用。地址冲突等其他启动错误仍明确报错，并记录安全的 error_code/error_type。换到另一网络时，Mini 通过旧局域网 IP 的库存推送仍不可达，不能把本地会话正常误认为跨网推送正常。
+
+## 最新执行策略：每个容量颜色独立串行，不同配置并行
+
+2026-10-28 用户确认：`per_profile_requests:true`、`single_active_request:false`。A–F 六个独立 Safari Profile 对应六个容量颜色，store 不参与锁键。同一配置最多一个执行流程，不同配置允许并行；同款不同店、同款新批次都在该款候选中等待，不能刷新正在操作的页面。
+
+`stall_handoff_seconds:10`：选店后等待日期/时间窗口共用一个等待起点；开始继续自提步骤后，等待下一步/联系人页面共用另一个起点。没有进展达到约 10 秒，就在确认仍处于可放弃的 Fulfillment 页面时结束旧工作流，标记 superseded，释放该款锁。候选从该款队列中按最新接收时间选取；发现时间及本机接收时间都必须在既有 10 秒 TTL 内。新请求在候选真正启动之前到达时优先执行新请求。没有有效候选也释放该款，等待后续信号；不补跑过期消息。
+
+切换采取协作退出，等待当前 AppleScript 调用返回后才抛出终止信号；不会用 Promise.race 留一个仍会点按钮的旧流程。旧工作流结束前不启动同款后续流程。旧页暂留原样并标记已放弃；下一条同款请求从已验证购物车重建该款页面，避免复用旧请求的时间和 Continue 去重状态。已进入联系人或付款阶段时不强制放弃；无法确认安全切换时仍保留页面。10 秒是轮询检查阈值，不是对浏览器/网络调用的硬实时打断。
+
+原 60 秒上限保留为每个配置的请求上限；在途流程通过操作前后检查协作退出，已结束等待接管的任务到期只释放自身。此模式不再启动外部清锁进程停止整个接收器，不影响其他款的工作流。手动一键清锁仍是用户主动取消全部任务的入口。
+
+Apple Pay 只允许一个自动流程持有面板；其他配置可并行完成联系人准备，停在付款按钮前，不覆盖或抢走正在授权面板的焦点。面板拥有者需要完成操作或由用户明确清锁/重置，才能再次自动开启另一个面板。并行模式提高 Apple 页面请求并发，不保证降低争抢或风控概率。
+
+生产关键配置：
+
+```json
+{
+  "per_profile_requests": true,
+  "single_active_request": false,
+  "drop_busy_events": false,
+  "recent_request_ttl_seconds": 10,
+  "stall_handoff_seconds": 10,
+  "global_lock_timeout_seconds": 60
+}
+```
+
+`global_lock_timeout_seconds` 沿用旧字段名，在此模式中解释为每配置超时。health 返回 execution_policy=per_configuration、profile_lock_timeout_seconds=60 和各配置 active_event_id。

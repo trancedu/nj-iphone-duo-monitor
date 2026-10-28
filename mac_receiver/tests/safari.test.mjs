@@ -258,3 +258,33 @@ test('default shared policy selects first enabled store even when notification n
  assert.equal((await prepareSafari(f.window,url,{...defaults,pickup_details:{...config.pickup_details,store_name:'Apple Notification Store'}})).status,'awaiting_user');
  assert.equal(chosen.store_id,'R001');assert.equal(f.counts().forbidden,0);
 });
+
+test('stalled date/time wait abandons once and never continues the old request',async t=>{
+ const f=await fixture(t,{existing:true});const call=f.window.call;let continues=0;
+ f.window.call=async(op,args)=>{
+  if(op==='dates')return {dates:[],options:[]};
+  if(op==='continuePickup')continues++;
+  const result=await call(op,args);
+  if(op==='selectStore')await f.page.evaluate(product=>{history.replaceState(null,'','/checkout?_s=Fulfillment-init');document.body.insertAdjacentHTML('beforeend','<p>'+product+'</p>');},product);
+  return result;
+ };
+ await assert.rejects(()=>prepareSafari(f.window,url,{...config,stall_handoff_seconds:.001,step_timeout_ms:1000},{shouldYieldToRecent:()=>true}),e=>e.code==='pickup_stalled_yield');
+ assert.equal(continues,0);assert.equal(await f.page.evaluate(()=>window.__duoPickupAttemptAbandoned),true);assert.equal(f.counts().forbidden,0);
+});
+test('stalled next-step wait abandons before contact or final payment actions',async t=>{
+ const f=await fixture(t,{existing:true});const call=f.window.call;
+ f.window.call=async(op,args)=>{
+  if(op==='continuePickup')return {clicked:true};
+  if(op==='prepareContact')return {ready:false};
+  const result=await call(op,args);
+  if(op==='selectStore')await f.page.evaluate(product=>{history.replaceState(null,'','/checkout?_s=Fulfillment-init');document.body.insertAdjacentHTML('beforeend','<p>'+product+'</p>');},product);
+  return result;
+ };
+ await assert.rejects(()=>prepareSafari(f.window,url,{...config,stall_handoff_seconds:.001,step_timeout_ms:1000},{shouldYieldToRecent:()=>true}),e=>e.code==='pickup_stalled_yield');
+ assert.equal(await f.page.evaluate(()=>window.__duoPickupAttemptAbandoned),true);assert.equal(f.counts().forbidden,0);
+});
+test('another product owns payment panel: preparation finishes without clicking or foregrounding',async t=>{
+ const f=await fixture(t,{existing:true});let foreground=0;f.window.foreground=async()=>foreground++;
+ const result=await prepareSafari(f.window,url,{...config,open_apple_pay_sheet:true},{tryClaimApplePay:()=>false,mayForeground:()=>false});
+ assert.equal(result.status,'awaiting_user');assert.equal(result.finalApplePayClicked,false);assert.equal(result.paymentPanelDeferred,true);assert.equal(foreground,0);assert.equal(f.counts().forbidden,0);
+});

@@ -16,6 +16,9 @@ Tailscale 只承载两台设备之间的库存信号。不要为此启用 Exit N
   "host": "100.103.212.49",
   "port": 8765,
   "allowed_sources": ["127.0.0.1", "100.83.108.82"],
+  "per_profile_requests": true,
+  "single_active_request": false,
+  "stall_handoff_seconds": 10,
   "drop_busy_events": false,
   "recent_request_ttl_seconds": 10
 }

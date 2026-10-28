@@ -43,6 +43,15 @@ export function safariDOM({op,args={}}) {
     if(candidates.length!==1)fail('session_continue_missing_or_ambiguous');
     click(candidates[0]);return {clicked:true};
   }
+  const canAbandonPickup=()=>u.searchParams.get('_s')==='Fulfillment-init'&&norm(document.body?.textContent).includes(args.product)&&!window.__duoApplePayRequested&&!document.getElementById('co-options-applePay')&&!all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent)));
+  if(op==='abandonStalledPickup'){
+    if(!canAbandonPickup())return {abandoned:false};
+    window.__duoPickupAttemptAbandoned=true;return {abandoned:true};
+  }
+  if(op==='resetAbandonedPickup'){
+    if(!canAbandonPickup())return {reset:false};
+    location.href='https://www.apple.com/shop/bag';return {reset:true};
+  }
   if(op==='rearmExpiredPickupStandby'){
     // Called only after a stopped/finished request; validate live inventory atomically.
     const d=safariDOM({op:'diagnosticState',args}),state=safariDOM({op:'standbyState',args});
@@ -72,7 +81,7 @@ export function safariDOM({op,args={}}) {
     const matching=typeof args.product==='string'&&norm(document.body?.textContent).includes(args.product);
     const processing=all('img,[aria-busy="true"],[role="progressbar"]').some(e=>visible(e)&&(e.tagName!=='IMG'||name(e)==='Processing'));
     const zipInput=all('input[role="combobox"]').some(e=>visible(e)&&name(e)==='Zip Code or City, State');
-    return {ready:checkout&&matching&&!!storeList()&&!protectedPage&&!expired,expired,session_warning:continueSessionButtons().length===1,protected:protectedPage,matching_product:matching,checkout,document_time_origin:performance.timeOrigin,pickup_ready:!processing&&!!storeList()&&visible(storeList())&&stores().length>0,zip_needed:zipInput,pickup_selected:radio(/^I[’']ll pick it up/i).some(checked)};
+    return {abandoned:!!window.__duoPickupAttemptAbandoned,ready:checkout&&matching&&!!storeList()&&!protectedPage&&!expired,expired,session_warning:continueSessionButtons().length===1,protected:protectedPage,matching_product:matching,checkout,document_time_origin:performance.timeOrigin,pickup_ready:!processing&&!!storeList()&&visible(storeList())&&stores().length>0,zip_needed:zipInput,pickup_selected:radio(/^I[’']ll pick it up/i).some(checked)};
   }
   if(op==='performanceState'){
     const n=performance.getEntriesByType('navigation')[0];

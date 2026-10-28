@@ -60,6 +60,17 @@ export async function waitFor(fn,timeout=20000,interval=100) {
   do {try{const value=await fn();if(value)return value;}catch(e){if(!['safari_navigation_pending','safari_apple_event_failed','safari_script_response_unrecognized'].includes(e.code))throw e;}await pause(interval);}while(Date.now()-start<timeout);
   throw new Stop('safari_step_timeout');
 }
+// Polls cooperatively: a thrown handoff ends this workflow before any later clicks.
+export async function waitForPickupProgress(fn,{startedAt=Date.now(),stallMs=10000,shouldYield,abandon,stage=()=>{},timeout=20000,now=Date.now}={}){
+  return waitFor(async()=>{
+    const value=await fn();if(value)return value;
+    if(shouldYield&&now()-startedAt>=stallMs&&await shouldYield()){
+      const result=await abandon();
+      if(result.abandoned){stage('pickup_stalled_handoff_at');throw new Stop('pickup_stalled_yield');}
+    }
+    return null;
+  },timeout);
+}
 // Only the unselected fulfillment page is eligible for standby refresh.
 export async function prepareSafariStandby(window,url,config,{refresh=false,stage=()=>{},sessionContinuationAttempted=false}={}){
   const product=expectedProduct(url),call=(op,args={})=>window.call(op,{product,...args});
@@ -78,6 +89,12 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
       await wait(async()=>{const s=await call('snapshot');return new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete';});
       state=await call('standbyState');
     }
+  }
+  if((state.abandoned||config.recover_stalled_pickup)&&state.checkout){
+    const reset=await call('resetAbandonedPickup');
+    if(!reset.reset)throw new Stop('abandoned_checkout_protected');
+    await wait(async()=>{const s=await call('snapshot');return new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete';});
+    state=await call('standbyState');
   }
   if(state.protected)throw new Stop('standby_checkout_protected');
   if(!state.ready){
@@ -116,7 +133,7 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
   stage('pickup_page_ready_at');
   return {status:'standby_checkout',product,zip:config.pickup_zip};
 }
-export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>{}}={}) {
+export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>{},shouldYieldToRecent,tryClaimApplePay,mayForeground=()=>true}={}) {
   productURL(url);const product=expectedProduct(url);const call=(op,args={})=>window.call(op,{product,...args});
   const timeout=config.step_timeout_ms??20000;
   if(!Number.isInteger(timeout)||timeout<100||timeout>60000)throw new Stop('invalid_safari_step_timeout');
@@ -226,16 +243,18 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
   const selection=await wait(async()=>{const r=await call('selectStore',{name:chosen.name,store_id:chosen.store_id});return r.selected?r:null;});
   if(selection.alreadySelected)stage('store_selection_reused_at');
   stage('store_selected_at');
-  const available=await wait(async()=>{const r=await call('dates');return r.dates.some(d=>d.enabled)?r:null;});
+  const timeWaitStart=Date.now();stage('pickup_time_wait_started_at');
+  const progressWait=(fn,startedAt)=>waitForPickupProgress(fn,{startedAt,stallMs:(config.stall_handoff_seconds??10)*1000,shouldYield:shouldYieldToRecent,abandon:()=>call('abandonStalledPickup'),stage,timeout:config.step_timeout_ms??20000});
+  const available=await progressWait(async()=>{const r=await call('dates');return r.dates.some(d=>d.enabled)?r:null;},timeWaitStart);
   const date=available.dates.find(d=>d.enabled&&d.checked)||available.dates.find(d=>d.enabled);
-  if(!date.checked)await wait(async()=>(await call('selectDate',{name:date.name})).selected);
+  if(!date.checked)await progressWait(async()=>(await call('selectDate',{name:date.name})).selected,timeWaitStart);
   const hasTime=os=>os?.some(o=>o.value&&!o.disabled&&/^\d{1,2}:\d{2}\s*[ap]\.?m\.?/i.test(o.label));
-  const options=date.checked&&hasTime(available.options)?available.options:await wait(async()=>{const os=(await call('times')).options;return hasTime(os)?os:null;});
+  const options=date.checked&&hasTime(available.options)?available.options:await progressWait(async()=>{const os=(await call('times')).options;return hasTime(os)?os:null;},timeWaitStart);
   let time=chooseTimeWindow(options,date.name,config.pickup_details);
   await call('selectTime',{value:time.value});stage('time_selected_at');
   if(window.onPerformance)window.onPerformance('before_details',await call('performanceState'));
-  let reselections=0;
-  await wait(async()=>{
+  let reselections=0;const detailsWaitStart=Date.now();stage('pickup_details_wait_started_at');
+  await progressWait(async()=>{
     const r=await call('continuePickup',{expected_time:time.value,expected_store_id:chosen.store_id,expected_date:date.name,allow_time_reselect:true});
     if(r.time_reset&&hasTime(r.options)){
       if(++reselections>3)throw new Stop('pickup_time_keeps_resetting');
@@ -243,23 +262,24 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
       await call('selectTime',{value:time.value});stage('time_reselected_at');
     }
     return r.clicked;
-  });stage('details_navigation_at');
+  },detailsWaitStart);stage('details_navigation_at');
   let contactSeen=false;
-  await wait(async()=>{
+  await progressWait(async()=>{
     const r=await call('prepareContact',{contact:config.pickup_details});
     if(r.filled&&!contactSeen){stage('details_page_ready_at');stage('contact_verified_at');contactSeen=true;}
     return r.ready;
-  });
+  },detailsWaitStart);
   if(config.handoff_idle_timeout_seconds>0&&config.handoff_event_id){const idle=await call('armIdle',{event_id:config.handoff_event_id});if(['tracking','payment_started'].includes(idle.status))stage('handoff_idle_armed_at');}
   if(window.onPerformance)window.onPerformance('contact_ready',await call('performanceState'));
   stage('handoff_at');
-  await window.foreground();
-  if(config.open_apple_pay_sheet===true){
+  const clickApplePay=config.open_apple_pay_sheet===true&&(!tryClaimApplePay||tryClaimApplePay());
+  if(mayForeground())await window.foreground();
+  if(clickApplePay){
     stage('apple_pay_sheet_requested_at');
     await call('requestApplePay',{contact:config.pickup_details}); // Exactly one invocation, never a wait/retry loop.
     stage('apple_pay_button_clicked_at');
   }
-  return {status:'awaiting_user',product,store:chosen.name,date:date.name,time:time.label,finalApplePayClicked:config.open_apple_pay_sheet===true,applePayAuthenticated:false};
+  return {status:'awaiting_user',product,store:chosen.name,date:date.name,time:time.label,finalApplePayClicked:clickApplePay,paymentPanelDeferred:config.open_apple_pay_sheet===true&&!clickApplePay,applePayAuthenticated:false};
 }
 async function main() {
   const argv=process.argv.slice(2);const value=key=>argv[argv.indexOf(key)+1];

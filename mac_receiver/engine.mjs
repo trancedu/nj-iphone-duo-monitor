@@ -81,7 +81,7 @@ export class Engine {
       item.status=result||'awaiting_user';
       if(item.status==='pickup_expired')item.reason='pickup_expired_after_timeout';
     } catch (error) {
-      item.status=error instanceof Stop&&error.code==='pickup_unavailable'?'pickup_unavailable':'manual_review';
+      item.status=error instanceof Stop&&error.code==='pickup_task_deadline'?'lock_timeout':error instanceof Stop&&error.code==='pickup_stalled_yield'?'superseded':error instanceof Stop&&error.code==='pickup_unavailable'?'pickup_unavailable':'manual_review';
       item.reason=error instanceof Stop?error.code:error?.name==='TimeoutError'?'timeout':'browser_error';
     }
     // Once stock was found or checkout progressed, never navigate back even if
@@ -89,6 +89,12 @@ export class Engine {
     const progressed=['pickup_stock_found_at','store_selected_at','time_selected_at','pickup_time_at','details_navigation_at','details_page_ready_at','contact_verified_at','pickup_details_at','handoff_at'].some(key=>Object.hasOwn(item.timestamps,key));
     if(item.status==='pickup_unavailable'&&progressed){item.status='manual_review';item.reason='pickup_unavailable_after_selection_preserved';}
     this.stage(item,'finished_at');
+    if(item.status==='superseded'||item.status==='lock_timeout'){
+      item.release_reason=item.status==='superseded'?'stalled_pickup_handoff':'profile_deadline';this.stage(item,'stalled_released_at');
+      this.reset(item.event_id,true);
+      if(item.status==='superseded')this.onStalledReleased?.(item.event_id);else this.onProfileReleased?.(item.event_id);
+      return; // The old workflow has unwound; never run its remaining steps or restore its page.
+    }
     this.signaling=true;
     try { const feedback=await this.browser.handoff(item.status,item.reason);if(feedback){item.feedback=feedback;this.stage(item,feedback.audio_queued!==undefined?'feedback_dispatched_at':'feedback_completed_at');} }
     catch { item.reason=item.reason||'attention_signal_failed';this.save();this.log(item,'attention_signal_failed'); }

@@ -290,3 +290,10 @@ test('maintenance rotates through all six slots even when earlier slots remain d
  for(let i=0;i<6;i++)await router.maintainStandby();
  assert.deepEqual(seen,[0,1,2,3,4,5]);
 });
+
+test('new attempt on an abandoned fulfillment page rebuilds its own document before proceeding',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','/checkout?_s=Fulfillment-init');window.__duoPickupAttemptAbandoned=true;window.__duoPickupStoreSelected=true;});
+ assert.equal((await prepareSafariStandby(f.window,url,{...cfg,recover_stalled_pickup:true})).status,'standby_checkout');
+ assert.deepEqual(f.counts(),{bagLoads:2,checkoutLoads:2});assert.equal((await f.window.call('standbyState',{product})).abandoned,false);
+});

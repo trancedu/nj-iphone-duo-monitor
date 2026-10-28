@@ -93,3 +93,11 @@ test('confirmed expired stock reuses pickup page without reload, navigation or r
  assert.equal((await f.b.restoreExpiredPickup()).status,'standby_checkout');
  assert.deepEqual(calls.map(c=>c.op),['rearmExpiredPickupStandby']);assert.equal(calls[0].args.zip,'07094');
 });
+
+test('per-profile cancellation prevents later workflow actions after an awaited operation returns',async()=>{
+ const f=fixture({per_profile_requests:true,global_lock_timeout_seconds:60});await f.b.start();f.b.ensurePage=async()=>{};let later=0;
+ f.b.window.call=async()=>{f.b.abortEventId='cancel-me';return {};};
+ f.b.workflow=async w=>{await w.call('test-slow-step');later++;return {status:'awaiting_user'};};
+ await assert.rejects(()=>f.b.prepare({event_id:'cancel-me',product_url:url,detected_at:new Date().toISOString()},()=>{}),e=>e.code==='pickup_task_deadline');
+ assert.equal(later,0);assert.equal(f.b.stalledProfilePending,true);
+});

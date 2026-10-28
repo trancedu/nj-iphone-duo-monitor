@@ -29,16 +29,26 @@ export class SafariPickupBrowser {
   async prepare(event,stage){
     if(this.idleRefreshPromise)await this.idleRefreshPromise.catch(()=>{});
     await this.ensurePage();
-    const cfg={...this.config,handoff_event_id:event.event_id,pickup_first_available_store:true,test_any_available_store:false,pickup_details:{...this.config.pickup_details}};
+    const cfg={...this.config,recover_stalled_pickup:this.stalledProfilePending===true,handoff_event_id:event.event_id,pickup_first_available_store:true,test_any_available_store:false,pickup_details:{...this.config.pickup_details}};
     cfg.pickup_zip=process.env.APPLE_PICKUP_ZIP??(this.config.standby_page==='pickup_checkout'?this.config.pickup_zip:event.pickup_zip)??this.config.pickup_zip;
     if(event.store_name)cfg.pickup_details.store_name=/^Apple\s/.test(event.store_name)?event.store_name:'Apple '+event.store_name;
     const context={backend:'safari',profile:this.config.safari_profile,window_id:this.window.id,requested_store_name:cfg.pickup_details.store_name,requested_store_id:event.store_id};
     const observe=(name,detail)=>stage(name,detail?{...detail,...context}:undefined);
+    const guard=()=>{
+      const limit=this.config.per_profile_requests?(this.config.global_lock_timeout_seconds||60)*1000:0;
+      if(this.abortEventId===event.event_id||(limit&&Date.now()-Date.parse(event.timestamps?.received_at||event.detected_at)>limit))throw new Stop('pickup_task_deadline');
+    };
+    const guardedWindow=new Proxy(this.window,{get:(target,key)=>{
+      if(!['call','goto','reload','foreground'].includes(key))return target[key];
+      return async(...args)=>{guard();const result=await target[key](...args);guard();return result;};
+    }});
+
     try{
-      this.lastResult=await this.workflow(this.window,event.product_url,cfg,{stage:observe});
+      this.lastResult=await this.workflow(guardedWindow,event.product_url,cfg,{stage:observe,shouldYieldToRecent:this.shouldAbandonStall?()=>this.shouldAbandonStall(event.event_id):this.hasRecentCandidate?()=>this.hasRecentCandidate(event.event_id):undefined,tryClaimApplePay:this.tryClaimApplePay?()=>{guard();return this.tryClaimApplePay(event.event_id);}:undefined,mayForeground:()=>this.mayForeground?.(event.event_id)!==false});
       if(this.lastResult.status==='pickup_unavailable')throw new Stop('pickup_unavailable');
-      return this.lastResult.status;
+      this.stalledProfilePending=false;return this.lastResult.status;
     }catch(error){
+      if(error instanceof Stop&&['pickup_stalled_yield','pickup_task_deadline'].includes(error.code)){this.stalledProfilePending=true;throw error;}
       if(!(error instanceof Stop&&error.code==='pickup_unavailable')){
         let diagnostic={};try{diagnostic=await this.window.call('diagnosticState',{product:expectedProduct(event.product_url)});}catch{}
         observe('pickup_failure_observed_at',{...diagnostic,kind:'pickup_failure',error_code:error instanceof Stop?error.code:'browser_error'});
@@ -67,7 +77,7 @@ export class SafariPickupBrowser {
   }
   async handoff(status,reason){
     if(status==='awaiting_user'&&this.config.handoff_idle_timeout_seconds>0)try{await this.window.call('armIdle',{event_id:this.activeTaskId});}catch{}
-    return this.signal(this.window,{status,reason},{mute_audio:status==='awaiting_user'&&this.eventAlert?.id===this.activeTaskId&&this.eventAlert.queued,event_id:this.activeTaskId,state_dir:this.config.state_dir,speech_enabled:this.config.speech_enabled,mode:this.config.dry_run?'test':'production',profile:this.config.safari_profile,product:expectedProduct(this.activeProductURL||this.config.preseeded_product_url)});
+    return this.signal(this.mayForeground?.(this.activeTaskId)===false?null:this.window,{status,reason},{mute_audio:status==='awaiting_user'&&this.eventAlert?.id===this.activeTaskId&&this.eventAlert.queued,event_id:this.activeTaskId,state_dir:this.config.state_dir,speech_enabled:this.config.speech_enabled,mode:this.config.dry_run?'test':'production',profile:this.config.safari_profile,product:expectedProduct(this.activeProductURL||this.config.preseeded_product_url)});
   }
   async inspectIdle(item){
     if(!this.ready())return {status:'browser_not_ready'};
