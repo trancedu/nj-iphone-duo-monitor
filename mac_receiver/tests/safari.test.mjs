@@ -10,7 +10,7 @@ const url='https://www.apple.com/shop/buy-iphone/iphone-18-pro/6.3-inch-display-
 const product='iPhone 18 Pro 256GB Burgundy';
 // Keep the fixture's 10 a.m. slots in the future regardless of test-run time.
 const pickupDate=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'long',day:'numeric'}).format(new Date(Date.now()+86400000)).replace(/\s/g,'').toLowerCase();
-const config={pickup_zip:'07094',pickup_unavailable_retries:1,pickup_retry_interval_ms:1000,pickup_details:{store_name:'Apple Test Store',first_name:'Test',last_name:'User',email:'test@example.com',phone:'2025550123',preferred_slot:2,min_lead_minutes:0}};
+const config={pickup_first_available_store:false,pickup_zip:'07094',pickup_unavailable_retries:1,pickup_retry_interval_ms:1000,pickup_details:{store_name:'Apple Test Store',first_name:'Test',last_name:'User',email:'test@example.com',phone:'2025550123',preferred_slot:2,min_lead_minutes:0}};
 async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarget=false,wrongLocation=false,walletSheet=false}={}) {
  const chrome=await chromium.launch({channel:'chrome',headless:true});t.after(()=>chrome.close());
  const page=await chrome.newPage();let bag=existing,adds=0,checks=0,forbidden=0;
@@ -104,7 +104,7 @@ test('available store with missing date stops without refreshing or payment',asy
 });
 test('contact failure after selecting stock never refreshes or proceeds to Pay',async t=>{
  const f=await fixture(t,{existing:true});const call=f.window.call;let reloads=0;
- f.window.call=(op,args)=>{if(op==='fillContact')throw new Stop('contact_not_verified');return call(op,args);};f.window.reload=()=>{reloads++;};
+ f.window.call=(op,args)=>{if(['fillContact','prepareContact'].includes(op))throw new Stop('contact_not_verified');return call(op,args);};f.window.reload=()=>{reloads++;};
  await assert.rejects(()=>prepareSafari(f.window,url,config),e=>e.code==='contact_not_verified');assert.equal(reloads,0);assert.equal(f.counts().forbidden,0);
 });
 test('captcha page stops without any click',async t=>{
@@ -198,4 +198,63 @@ test('uncertain Apple Pay invocation is not retried and the found-stock stage re
  f.window.call=async(op,args)=>{if(op==='requestApplePay'){requests++;await call(op,args);throw Error('reply_lost_after_click');}return call(op,args);};
  await assert.rejects(()=>prepareSafari(f.window,url,{...config,open_apple_pay_sheet:true},{stage:s=>stages.push(s)}),/reply_lost_after_click/);
  assert.equal(requests,1);assert.ok(stages.includes('pickup_stock_found_at'));assert.ok(stages.includes('apple_pay_sheet_requested_at'));assert.equal(await f.page.evaluate(()=>window.walletRequests),1);assert.equal(await f.page.evaluate(()=>window.authorized),undefined);
+});
+test('Available Windows placeholder and reset time cannot reach pickup details',async t=>{
+ const f=await fixture(t,{existing:true});await f.page.goto('https://www.apple.com/checkout');
+ const slot=f.page.locator('select');
+ await slot.evaluate(e=>{const o=new Option('Available Windows','placeholder',true,true);e.prepend(o);e.value='placeholder';});
+ await assert.rejects(()=>f.window.call('selectTime',{value:'placeholder'}),/time_unavailable/);
+ await assert.rejects(()=>f.window.call('continuePickup',{expected_time:'placeholder'}),/pickup_time_not_selected/);
+ await f.window.call('selectTime',{value:'2'});await slot.evaluate(e=>e.value='placeholder');
+ await assert.rejects(()=>f.window.call('continuePickup',{expected_time:'2'}),/pickup_time_not_selected/);
+ assert.equal(new URL(f.page.url()).pathname,'/checkout');assert.equal(f.counts().forbidden,0);
+});
+
+test('time reset after initial selection is reselected before the one Continue click',async t=>{
+ const f=await fixture(t,{existing:true});const call=f.window.call;let continues=0,resets=0;
+ f.window.call=async(op,args)=>{
+  if(op==='continuePickup'){
+   continues++;
+   if(resets++===0)await f.page.locator('select').evaluate(e=>{e.value='';});
+  }
+  return call(op,args);
+ };
+ const stages=[];const r=await prepareSafari(f.window,url,config,{stage:s=>stages.push(s)});
+ assert.equal(r.status,'awaiting_user');assert.equal(continues,2);
+ assert.ok(stages.includes('time_reselected_at'));assert.equal(f.counts().forbidden,0);
+});
+test('Continue request is issued once even if its response is queried again',async t=>{
+ const f=await fixture(t,{existing:true});await f.page.goto('https://www.apple.com/checkout');
+ await f.page.getByRole('button',{name:'Continue to Pickup Details'}).evaluate(e=>e.onclick=()=>{window.continueRequests=(window.continueRequests||0)+1;});
+ await f.window.call('selectTime',{value:'2'});
+ await f.window.call('continuePickup',{expected_time:'2'});await f.window.call('continuePickup',{expected_time:'2'});
+ assert.equal(await f.page.evaluate(()=>window.continueRequests),1);
+});
+
+test('visible available store is selected before time slots without expanding other stores',async t=>{
+ const f=await fixture(t,{existing:true});const call=f.window.call;let expanded=0,selected=false;
+ f.window.call=async(op,args)=>{
+  if(op==='moreStores')expanded++;
+  if(op==='dates')assert.equal(selected,true);
+  const r=await call(op,args);
+  if(op==='selectStore')selected=r.selected;
+  return r;
+ };
+ assert.equal((await prepareSafari(f.window,url,config)).status,'awaiting_user');
+ assert.equal(selected,true);assert.equal(expanded,0);assert.equal(f.counts().forbidden,0);
+});
+
+test('default shared policy selects first enabled store even when notification names another',async t=>{
+ const f=await fixture(t,{existing:true});const call=f.window.call;let chosen;
+ f.window.call=async(op,args)=>{
+  if(op==='stores')await f.page.locator('#store-target').evaluate(e=>{
+   if(document.getElementById('first-available'))return;
+   const label=document.createElement('label');label.innerHTML='<input id="first-available" type="radio" name="store" value="R001">Apple First Available Today';e.parentElement.before(label);
+  });
+  if(op==='selectStore')chosen=args;
+  return call(op,args);
+ };
+ const {pickup_first_available_store,...defaults}=config;
+ assert.equal((await prepareSafari(f.window,url,{...defaults,pickup_details:{...config.pickup_details,store_name:'Apple Notification Store'}})).status,'awaiting_user');
+ assert.equal(chosen.store_id,'R001');assert.equal(f.counts().forbidden,0);
 });

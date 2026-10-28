@@ -12,8 +12,8 @@ import {SafariPickupBrowser} from '../safari/browser.mjs';
 import {Engine} from '../engine.mjs';
 const url='https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-512gb-star-white-unlocked';
 const product='iPhone Duo 512GB Star White';
-const cfg={standby_page:'pickup_checkout',pickup_zip:'07094',step_timeout_ms:1000,pickup_unavailable_retries:0,pickup_details:{store_name:'Apple Queens Center',first_name:'Test',last_name:'User',email:'test@example.com',phone:'2025550123',preferred_slot:2,min_lead_minutes:0}};
-async function fixture(t,{hiddenExtras=false,noAvailability=false}={}){
+const cfg={pickup_first_available_store:false,standby_page:'pickup_checkout',pickup_zip:'07094',step_timeout_ms:1000,pickup_unavailable_retries:0,pickup_details:{store_name:'Apple Queens Center',first_name:'Test',last_name:'User',email:'test@example.com',phone:'2025550123',preferred_slot:2,min_lead_minutes:0}};
+async function fixture(t,{hiddenExtras=false,noAvailability=false,defaultSelected=false}={}){
  const browser=await chromium.launch({channel:'chrome',headless:true});t.after(()=>browser.close());
  const page=await browser.newPage();let bagLoads=0,checkoutLoads=0,expire=false;
  await page.route('**/*',async r=>{
@@ -21,8 +21,8 @@ async function fixture(t,{hiddenExtras=false,noAvailability=false}={}){
    bagLoads++;return r.fulfill({contentType:'text/html',body:`<div role="listitem" data-autom="bag-item-1"><h2>${product}</h2><select><option>1</option></select></div><button id="shoppingCart.actions.navApwCheckout" onclick="location.href='/checkout'">Check out with Apple Pay</button>`});
   }
   if(new URL(r.request().url()).pathname!=='/checkout')return r.fulfill({status:204});
-  if(expire){expire=false;return r.fulfill({status:302,headers:{location:'https://www.apple.com/shop/bag'}});}
-  checkoutLoads++;return r.fulfill({contentType:'text/html; charset=utf-8',body:`<p>${product}</p><button aria-label="Edit Zip Code or City, State, 07094">07094</button><label><input type="radio" checked>I’ll pick it up</label>${noAvailability?`<div role="alert">There's no availability within your location. Please try another search.</div>`:''}<fieldset><legend>Select your pickup store:</legend><label><input type="radio" disabled>Apple Queens Center Currently unavailable</label>${hiddenExtras?`<div id="extra" hidden><label><input type="radio" disabled>Apple Other Currently unavailable</label></div><a href="#" onclick="event.preventDefault();document.getElementById('extra').hidden=false;this.remove()">Show more stores</a>`:''}</fieldset>`});
+  if(expire){expire=false;return r.fulfill({contentType:'text/html',body:"<script>location.replace('/shop/bag')</script>"});}
+  checkoutLoads++;return r.fulfill({contentType:'text/html; charset=utf-8',body:`<h1>How would you like to get your order?</h1><p>${product}</p><button aria-label="Edit Zip Code or City, State, 07094">07094</button><label><input type="radio" checked>I’ll pick it up</label>${noAvailability?`<div role="alert">There's no availability within your location. Please try another search.</div>`:''}<fieldset><legend>Select your pickup store:</legend><label><input type="radio" ${defaultSelected?'checked':'disabled'}>Apple Queens Center Currently unavailable</label>${hiddenExtras?`<div id="extra" hidden><label><input type="radio" disabled>Apple Other Currently unavailable</label></div><a href="#" onclick="event.preventDefault();document.getElementById('extra').hidden=false;this.remove()">Show more stores</a>`:''}</fieldset>`});
  });
  await page.goto('https://www.apple.com/shop/bag');
  const window={call:async(op,args={})=>{try{return await page.evaluate(['locationState','openLocation'].includes(op)?pickupLocationDOM:safariDOM,['locationState','openLocation'].includes(op)?{open:op==='openLocation'}:{op,args});}catch(e){if(e.message.includes('Execution context was destroyed'))e.code='safari_navigation_pending';throw e;}},goto:u=>page.goto(u),reload:()=>page.reload()};
@@ -30,23 +30,23 @@ async function fixture(t,{hiddenExtras=false,noAvailability=false}={}){
 }
 test('standby starts from exact Bag and verifies pickup ZIP without selection',async t=>{
  const f=await fixture(t);assert.equal((await prepareSafariStandby(f.window,url,cfg)).status,'standby_checkout');
- assert.deepEqual(f.counts(),{bagLoads:2,checkoutLoads:1});
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:1});
  assert.equal((await f.window.call('locationState')).displayed_zip,'07094');
  assert.equal(await f.page.getByRole('radio',{name:/Apple Queens/}).isChecked(),false);
 });
 test('incoming warm event reloads once and skips Bag and checkout navigation',async t=>{
  const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);const stages=[];
  const r=await prepareSafari(f.window,url,cfg,{stage:s=>stages.push(s)});
- assert.equal(r.status,'pickup_unavailable');assert.deepEqual(f.counts(),{bagLoads:2,checkoutLoads:2});
+ assert.equal(r.status,'pickup_unavailable');assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:2});
  assert.ok(stages.includes('standby_refresh_at'));assert.ok(!stages.includes('checkout_clicked_at'));
 });
-test('standby and every inventory retry expand the full store list',async t=>{
+test('standby and retries leave irrelevant hidden stores collapsed',async t=>{
  const f=await fixture(t,{hiddenExtras:true});await prepareSafariStandby(f.window,url,cfg);
- assert.ok((await f.window.call('stores')).stores.every(s=>s.visible));
+ assert.equal(await f.page.locator('#extra').isVisible(),false);
  assert.equal((await prepareSafari(f.window,url,{...cfg,pickup_unavailable_retries:2})).status,'pickup_unavailable');
- assert.equal(f.counts().checkoutLoads,4);assert.equal(f.counts().bagLoads,2);
- assert.ok((await f.window.call('stores')).stores.every(s=>s.visible));
- assert.equal(await f.page.getByRole('link',{name:'Show more stores'}).count(),0);
+ assert.equal(f.counts().checkoutLoads,4);assert.equal(f.counts().bagLoads,1);
+ assert.equal(await f.page.locator('#extra').isVisible(),false);
+ assert.equal(await f.page.getByRole('link',{name:'Show more stores'}).count(),1);
 });
 test('visible area-unavailable banner skips expansion and uses bounded retries even when target missing',async t=>{
  const f=await fixture(t,{hiddenExtras:true,noAvailability:true});await prepareSafariStandby(f.window,url,cfg);
@@ -55,16 +55,19 @@ test('visible area-unavailable banner skips expansion and uses bounded retries e
  const stages=[];
  const r=await prepareSafari(f.window,url,{...cfg,pickup_unavailable_retries:2,pickup_details:{...cfg.pickup_details,store_name:'Apple Missing'}},{stage:s=>stages.push(s)});
  assert.equal(r.status,'pickup_unavailable');assert.equal(f.counts().checkoutLoads,4);
- assert.equal(await f.page.locator('#extra').isVisible(),false);assert.ok(stages.includes('standby_expansion_skipped_no_availability_at'));
- // A removed or hidden warning no longer suppresses expansion.
+ assert.equal(await f.page.locator('#extra').isVisible(),false);
+ // A hidden warning permits on-demand expansion, but standby itself stays collapsed.
  await f.page.getByRole('alert').evaluate(e=>e.hidden=true);
  assert.equal((await f.window.call('stores')).no_availability,false);
  await prepareSafariStandby(f.window,url,cfg);
+ assert.equal(await f.page.locator('#extra').isVisible(),false);
+ assert.equal((await f.window.call('moreStores')).expanded,true);
  assert.equal(await f.page.locator('#extra').isVisible(),true);
 });
 test('selected store and pickup details are protected from maintenance reload',async t=>{
  const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
- await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>{e.disabled=false;e.checked=true;});
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>{e.disabled=false;});
+ await f.page.getByRole('radio',{name:/Apple Queens/}).check();
  await assert.rejects(()=>prepareSafariStandby(f.window,url,cfg,{refresh:true}),e=>e.code==='standby_checkout_protected');
  assert.equal(f.counts().checkoutLoads,1);
  await f.page.setContent('<h1>Now fill out your pickup information.</h1><button id="co-options-applePay">Continue with Apple Pay</button>');
@@ -74,7 +77,7 @@ test('selected store and pickup details are protected from maintenance reload',a
 test('expired checkout returning to Bag rebuilds once from verified quantity one',async t=>{
  const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);f.expire();
  assert.equal((await prepareSafariStandby(f.window,url,cfg,{refresh:true})).status,'standby_checkout');
- assert.deepEqual(f.counts(),{bagLoads:3,checkoutLoads:2});
+ assert.deepEqual(f.counts(),{bagLoads:2,checkoutLoads:2});
 });
 test('global idle maintenance serializes profiles and yields to reserved arrival',async t=>{
  const root=mkdtempSync(join(tmpdir(),'standby-router-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
@@ -174,7 +177,7 @@ test('session warning click dismisses only exact shopping modal without navigati
  await b.start();b.lastIdleRefreshAt=0;
  assert.equal((await b.refreshStandby(30000)).status,'session_continued');
  assert.equal(calls,0);assert.equal((await f.window.call('standbyState',{product})).session_warning,false);
- assert.deepEqual(f.counts(),{bagLoads:2,checkoutLoads:1});
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:1});
 });
 test('unrelated or ambiguous shopping buttons never get clicked',async t=>{
  const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
@@ -183,4 +186,52 @@ test('unrelated or ambiguous shopping buttons never get clicked',async t=>{
  await assert.rejects(()=>f.window.call('continueShoppingSession'),/missing_or_ambiguous/);
  await f.page.setContent('<div role="dialog"><h2>Are you still shopping?</h2><button>I’m still shopping</button><button>I’m still shopping</button></div>');
  await assert.rejects(()=>f.window.call('continueShoppingSession'),/missing_or_ambiguous/);
+});
+
+
+test('Apple default store is allowed only after script prepares standby; explicit selection stays protected',async t=>{
+ const f=await fixture(t,{defaultSelected:true});
+ assert.equal((await prepareSafariStandby(f.window,url,cfg)).status,'standby_checkout');
+ assert.equal((await f.window.call('standbyState',{product})).protected,false);
+ assert.equal((await prepareSafariStandby(f.window,url,cfg,{refresh:true})).status,'standby_checkout');
+ const stores=await f.window.call('stores');
+ await f.window.call('selectStore',{name:stores.stores[0].name});
+ assert.equal((await f.window.call('standbyState',{product})).protected,true);
+ await assert.rejects(()=>prepareSafariStandby(f.window,url,cfg,{refresh:true}),e=>e.code==='standby_checkout_protected');
+});
+
+
+test('store selection uses stable store ID when distance text changes after observation',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>{e.value='R612';e.disabled=false;});
+ const original=(await f.window.call('stores')).stores[0];
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>{e.parentNode.lastChild.textContent='Apple Queens Center27.24 miAvailable TomorrowIn-Store Pickup';});
+ assert.equal((await f.window.call('selectStore',{name:original.name,store_id:original.store_id})).selected,true);
+});
+
+test('already selected available store is verified without another click',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>{e.disabled=false;e.checked=true;window.storeClicks=0;e.addEventListener('click',()=>window.storeClicks++);});
+ const store=(await f.window.call('stores')).stores[0];
+ const result=await f.window.call('selectStore',{name:store.name});
+ assert.equal(result.selected,true);assert.equal(result.alreadySelected,true);
+ assert.equal(await f.page.evaluate(()=>window.storeClicks),0);
+ assert.equal(await f.page.evaluate(()=>window.__duoPickupStoreSelected),true);
+});
+
+test('standby arm waits through transient fulfillment replacement but preserves actual selection protection',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ const root=await f.page.locator('fieldset').evaluate(e=>{const html=e.outerHTML;e.remove();return html;});
+ assert.equal((await f.window.call('armPickupStandby',{product})).armed,false);
+ await f.page.evaluate(html=>document.body.insertAdjacentHTML('beforeend',html),root);
+ assert.equal((await f.window.call('armPickupStandby',{product})).armed,true);
+ await f.page.evaluate(()=>{window.__duoPickupStoreSelected=true;document.querySelector('fieldset').remove();});
+ await assert.rejects(()=>f.window.call('armPickupStandby',{product}),/standby_checkout_protected/);
+});
+
+test('warm reload retries arming when fulfillment DOM is temporarily incomplete',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);const call=f.window.call;let attempts=0;
+ f.window.call=async(op,args)=>{if(op==='armPickupStandby'&&++attempts===1)return {armed:false,ready:false};return call(op,args);};
+ assert.equal((await prepareSafariStandby(f.window,url,cfg,{refresh:true})).status,'standby_checkout');
+ assert.ok(attempts>=2);
 });

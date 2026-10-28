@@ -37,14 +37,23 @@ export class SafariWindow {
     const locationOperation=['locationState','openLocation'].includes(op);
     const execute=locationOperation?pickupLocationDOM:['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM;
     const input=locationOperation?{open:op==='openLocation'}:{op,args};
-    const js=`(()=>{try{return JSON.stringify({ok:true,value:(${execute.toString()})(${JSON.stringify(input)})});}catch(e){return JSON.stringify({ok:false,error:e.message});}})()`;
+    const js=`(()=>{const t=performance.now();try{const value=(${execute.toString()})(${JSON.stringify(input)});return JSON.stringify({ok:true,value,dom_ms:performance.now()-t});}catch(e){return JSON.stringify({ok:false,error:e.message});}})()`;
+    const bridgeStart=performance.now();
     const raw=await appleScript(this.script(`return do JavaScript ${asString(js)} in tab 1 of w`));
     let result;try{result=JSON.parse(raw);}catch{throw new Stop('safari_script_response_unrecognized');}
+    this.onMetric?.({op,at:new Date().toISOString(),bridge_ms:performance.now()-bridgeStart,dom_ms:result.dom_ms,ok:result.ok});
     if(!result.ok)throw new Stop(result.error||'safari_dom_failed');return result.value;
   }
   async goto(url){const u=new URL(url);if(u.origin!=='https://www.apple.com')throw new Stop('unexpected_navigation');await appleScript(this.script(`set URL of tab 1 of w to ${asString(url)}`));}
   async reload(){await appleScript(this.script('do JavaScript "location.reload()" in tab 1 of w'));}
   async foreground(){await appleScript(this.script('set index of w to 1\nactivate'));}
+  async returnToTestPickup(){
+    if(!/^PickupTest[A-Za-z0-9_-]*$/.test(this.profile))throw new Stop('test_profile_required');
+    const s=await this.call('snapshot'),u=new URL(s.url);
+    if(!/^secure\d*\.store\.apple\.com$/.test(u.hostname)||u.pathname!=='/shop/apw/checkout'||!['PickupContact-init','Fulfillment-init'].includes(u.searchParams.get('_s')))throw new Stop('unexpected_test_checkout_page');
+    if(u.searchParams.get('_s')==='PickupContact-init'){u.searchParams.set('_s','Fulfillment-init');await appleScript(this.script(`set URL of tab 1 of w to ${asString(u.href)}`));}
+  }
+
 }
 export async function waitFor(fn,timeout=20000,interval=100) {
   const start=Date.now();
@@ -52,13 +61,6 @@ export async function waitFor(fn,timeout=20000,interval=100) {
   throw new Stop('safari_step_timeout');
 }
 // Only the unselected fulfillment page is eligible for standby refresh.
-async function expandPickupStores(call,wait,stage){
-  const more=await call('moreStores');
-  if(more.noAvailability){stage('standby_expansion_skipped_no_availability_at');return;}
-  if(!more.expanded)return;
-  await wait(async()=>{const r=await call('stores');return r.stores.length&&r.stores.every(s=>s.visible!==false);});
-  stage('standby_store_list_expanded_at');
-}
 export async function prepareSafariStandby(window,url,config,{refresh=false,stage=()=>{}}={}){
   const product=expectedProduct(url),call=(op,args={})=>window.call(op,{product,...args});
   const wait=fn=>waitFor(fn,config.step_timeout_ms??20000);
@@ -70,29 +72,24 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
   }
   if(state.protected)throw new Stop('standby_checkout_protected');
   if(!state.ready){
-    await window.goto('https://www.apple.com/shop/bag');
+    const current=await call('snapshot');
+    if(new URL(current.url).pathname!=='/shop/bag')await window.goto('https://www.apple.com/shop/bag');
     await wait(async()=>{const s=await call('snapshot');return s.ready==='complete'&&(s.empty||s.bag.length&&s.bag.every(i=>i.title&&i.quantity));});
     await prepareSafari(window,url,config,{seedOnly:true,stage});
     await wait(async()=>(await call('checkoutReady')).ready);
     await call('checkout');stage('checkout_clicked_at');
   }else if(refresh){
-    const before=await call('snapshot');
-    await window.reload();stage('standby_refresh_at');
-    await wait(async()=>{const s=await call('snapshot');return s.document_time_origin!==before.document_time_origin&&s.ready==='complete';});
-    await wait(async()=>{
-      const s=await call('snapshot'),p=new URL(s.url);
-      if(!/^\/(?:shop\/(?:apw\/)?)?checkout(?:\/|$)/.test(p.pathname))return true;
-      const state=await call('standbyState'),ready=await call('pickupReady');
-      return state.expired||state.protected||ready.ready||ready.zipNeeded||s.buttons.some(b=>/return to (?:bag|store)|continue shopping/i.test(b.name));
-    });
+    const before=state;
+    stage('standby_refresh_requested_at');await window.reload();stage('standby_refresh_at');
+    state=await wait(async()=>{const s=await call('standbyState');return s.document_time_origin!==before.document_time_origin&&(s.expired||!s.checkout||s.pickup_ready||s.zip_needed)?s:null;});
     // Expired sessions can return to Bag or an error page. Rebuild once from
     // the verified quantity-one Bag, never loop on a stale checkout URL.
-    state=await call('standbyState');
+    if(state.pickup_ready)state=await wait(async()=>{const s=await call('armPickupStandby');return s.armed?s:null;});
     if(state.protected)throw new Stop('standby_checkout_protected');
     if(!state.ready)return prepareSafariStandby(window,url,config,{stage});
   }
-  await wait(async()=>(await call('pickup')).ready);
-  await wait(async()=>{const s=await call('pickupReady');return s.ready||s.zipNeeded;});
+  if(!state.pickup_selected)await wait(async()=>(await call('pickup')).ready);
+  if(!state.pickup_ready)await wait(async()=>{const s=await call('pickupReady');return s.ready||s.zipNeeded;});
   const location=await call('locationState');
   if(location.displayed_zip!==config.pickup_zip){
     stage('pickup_location_correction_started_at');
@@ -105,8 +102,7 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
     if(actual.displayed_zip!==config.pickup_zip)throw new Stop('standby_zip_not_verified');
     stage('pickup_location_corrected_at');
   }
-  await expandPickupStores(call,wait,stage);
-  const ready=await call('standbyState');
+  const ready=await wait(async()=>{const s=await call('armPickupStandby');return s.armed?s:null;});
   if(!ready.ready||ready.protected)throw new Stop('standby_checkout_not_verified');
   stage('pickup_page_ready_at');
   return {status:'standby_checkout',product,zip:config.pickup_zip};
@@ -146,7 +142,6 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     await wait(async()=>(await call('pickup')).ready);
     let ready=await wait(async()=>{const s=await call('pickupReady');return s.ready||s.zipNeeded?s:null;});
     if(ready.zipNeeded){await call('zip',{zip:config.pickup_zip});await wait(async()=>(await call('pickupReady')).ready);}
-    if(config.standby_page==='pickup_checkout')await expandPickupStores(call,wait,stage);
   };
   if(!warm){await openPickup();stage('pickup_page_ready_at');}
   const retries=config.pickup_unavailable_retries??2,interval=config.pickup_retry_interval_ms??1000;
@@ -156,7 +151,7 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     try{return await wait(async()=>{const r=await call('stores');if(!r.stores.length)return null;lastRead=r;return r.stores;});}
     catch(e){if(e instanceof Stop&&e.code==='safari_step_timeout')throw new Stop('store_list_unrecognized');throw e;}
   };
-  const preferred=config.pickup_details.store_name,any=config.test_any_available_store===true;
+  const preferred=config.pickup_details.store_name,any=config.pickup_first_available_store!==false||config.test_any_available_store===true;
   const observe=(attempt,phase,stores,extra={})=>{
     const result=classifyStores(stores,preferred,any);
     if(lastRead?.no_availability&&!result.target&&result.verdict!=='target_store_ambiguous')result.verdict='pickup_area_unavailable';
@@ -181,7 +176,7 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
         stage('pickup_location_corrected_at');
       }
     }
-    if(!any&&check.verdict==='target_store_not_listed'){
+    if(!any&&check.verdict==='target_store_not_listed'&&!lastRead?.no_availability){
       const more=await call('moreStores');
       if(more.expanded){
         try{stores=await wait(async()=>{const r=await call('stores');if(r.stores.length)lastRead=r;return r.stores.length&&classifyStores(r.stores,preferred,any).verdict!=='target_store_not_listed'?r.stores:null;});}
@@ -217,18 +212,37 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     });
     stage('target_store_revealed_at');
   }
-  await wait(async()=>(await call('selectStore',{name:chosen.name})).selected);stage('store_selected_at');
-  const dates=await wait(async()=>{const ds=(await call('dates')).dates;return ds.some(d=>d.enabled)?ds:null;});
-  const date=dates.find(d=>d.enabled&&d.checked)||dates.find(d=>d.enabled);
-  await wait(async()=>(await call('selectDate',{name:date.name})).selected);
-  const options=await wait(async()=>{const os=(await call('times')).options;return os.some(o=>o.value&&!o.disabled)?os:null;});
-  const time=chooseTimeWindow(options,date.name,config.pickup_details);
+  // selectStore verifies selection and protects this page; checked radios are never clicked again.
+  const selection=await wait(async()=>{const r=await call('selectStore',{name:chosen.name,store_id:chosen.store_id});return r.selected?r:null;});
+  if(selection.alreadySelected)stage('store_selection_reused_at');
+  stage('store_selected_at');
+  const available=await wait(async()=>{const r=await call('dates');return r.dates.some(d=>d.enabled)?r:null;});
+  const date=available.dates.find(d=>d.enabled&&d.checked)||available.dates.find(d=>d.enabled);
+  if(!date.checked)await wait(async()=>(await call('selectDate',{name:date.name})).selected);
+  const hasTime=os=>os?.some(o=>o.value&&!o.disabled&&/^\d{1,2}:\d{2}\s*[ap]\.?m\.?/i.test(o.label));
+  const options=date.checked&&hasTime(available.options)?available.options:await wait(async()=>{const os=(await call('times')).options;return hasTime(os)?os:null;});
+  let time=chooseTimeWindow(options,date.name,config.pickup_details);
   await call('selectTime',{value:time.value});stage('time_selected_at');
-  await call('continuePickup');stage('details_navigation_at');
-  await wait(async()=>(await call('detailsReady')).ready);stage('details_page_ready_at');
+  if(window.onPerformance)window.onPerformance('before_details',await call('performanceState'));
+  let reselections=0;
+  await wait(async()=>{
+    const r=await call('continuePickup',{expected_time:time.value,expected_store_id:chosen.store_id,expected_date:date.name,allow_time_reselect:true});
+    if(r.time_reset&&hasTime(r.options)){
+      if(++reselections>3)throw new Stop('pickup_time_keeps_resetting');
+      stage('pickup_time_reset_observed_at');time=chooseTimeWindow(r.options,date.name,config.pickup_details);
+      await call('selectTime',{value:time.value});stage('time_reselected_at');
+    }
+    return r.clicked;
+  });stage('details_navigation_at');
+  let contactSeen=false;
+  await wait(async()=>{
+    const r=await call('prepareContact',{contact:config.pickup_details});
+    if(r.filled&&!contactSeen){stage('details_page_ready_at');stage('contact_verified_at');contactSeen=true;}
+    return r.ready;
+  });
   if(config.handoff_idle_timeout_seconds>0&&config.handoff_event_id){const idle=await call('armIdle',{event_id:config.handoff_event_id});if(['tracking','payment_started'].includes(idle.status))stage('handoff_idle_armed_at');}
-  await wait(async()=>(await call('fillContact',{contact:config.pickup_details})).filled);stage('contact_verified_at');
-  await wait(async()=>(await call('handoffReady')).ready);stage('handoff_at');
+  if(window.onPerformance)window.onPerformance('contact_ready',await call('performanceState'));
+  stage('handoff_at');
   await window.foreground();
   if(config.open_apple_pay_sheet===true){
     stage('apple_pay_sheet_requested_at');
@@ -242,10 +256,11 @@ async function main() {
   if(argv.includes('--list-windows')) {
     console.log(await appleScript('tell application "Safari"\nset resultText to ""\nrepeat with w in windows\nset resultText to resultText & (id of w) & (ASCII character 9) & (name of w) & (ASCII character 9) & (count of tabs of w) & linefeed\nend repeat\nreturn resultText\nend tell'));return;
   }
-  const action=argv[0];if(!['inspect','seed','prepare','release'].includes(action)||!argv.includes('--window-id')||!argv.includes('--profile')||!argv.includes('--config')||!argv.includes('--url'))throw new Stop('usage_safari_shopping_action_window_profile_config_url');
+  const action=argv[0];if(!['inspect','seed','standby','prepare','release'].includes(action)||!argv.includes('--window-id')||!argv.includes('--profile')||!argv.includes('--config')||!argv.includes('--url'))throw new Stop('usage_safari_shopping_action_window_profile_config_url');
   const configFile=resolve(value('--config')),config=JSON.parse(readFileSync(configFile));
   if(process.env.APPLE_PICKUP_ZIP!==undefined){if(!/^\d{5}$/.test(process.env.APPLE_PICKUP_ZIP))throw new Stop('invalid_pickup_zip');config.pickup_zip=process.env.APPLE_PICKUP_ZIP;}
   const url=productURL(value('--url'));const window=new SafariWindow(Number(value('--window-id')),value('--profile'));
+  if(argv.includes('--test-auto-cancel-apple-pay'))throw new Stop('automatic_wallet_cancellation_disabled');
   const dir=resolve(dirname(configFile),config.safari_test_state_dir||'runtime-safari');mkdirSync(dir,{recursive:true,mode:0o700});
   const lock=join(dir,'profile-'+createHash('sha256').update(window.profile).digest('hex').slice(0,16)+'.lock');let fd;
   if(action==='release'){
@@ -257,16 +272,39 @@ async function main() {
   if(action==='inspect'){console.log(JSON.stringify(await window.call('snapshot')));return;}
   try{fd=openSync(lock,'wx',0o600);}catch{throw new Stop('safari_test_window_locked');}
   writeFileSync(fd,String(process.pid));closeSync(fd);
-  const timestamps={},observations=[];const out=join(dir,`safari-${window.id}-${Date.now()}.local.json`);let result;
-  const save=()=>{writeFileSync(out,JSON.stringify({window_id:window.id,profile:window.profile,timestamps,observations,...result},null,2),{mode:0o600});};
+  const timestamps={},observations=[],metrics=[],performanceMarkers=[];const out=join(dir,`safari-${window.id}-${Date.now()}.local.json`);let result;
+  const trace=argv.includes('--trace')||argv.includes('--trace-bridge');
+  if(trace)window.onMetric=m=>metrics.push(m);
+  if(argv.includes('--trace'))window.onPerformance=(label,data)=>performanceMarkers.push({label,data});
+  const save=()=>{writeFileSync(out,JSON.stringify({window_id:window.id,profile:window.profile,timestamps,observations,...(trace?{metrics,performance_markers:performanceMarkers}:{}),...result},null,2),{mode:0o600});};
+  const stage=(name,detail)=>{timestamps[name]=new Date().toISOString();if(detail)observations.push({at:timestamps[name],...sanitizeObservation({...detail,backend:'safari',profile:window.profile,window_id:window.id})});save();};
+  const feedback=async()=>argv.includes('--quiet')?{audio_skipped:'quiet_test'}:signalSafari(window,result,{speech_enabled:config.speech_enabled,profile:window.profile,product:expectedProduct(url)});
   try{
-    result=action==='inspect'?await window.call('snapshot'):await prepareSafari(window,url,config,{seedOnly:action==='seed',stage:(name,detail)=>{timestamps[name]=new Date().toISOString();if(detail)observations.push({at:timestamps[name],...sanitizeObservation({...detail,backend:'safari',profile:window.profile,window_id:window.id})});save();}});
+    stage('command_started_at');
+    if(action==='standby'&&argv.includes('--adopt-test-standby')){
+      if(!/^PickupTest[A-Za-z0-9_-]*$/.test(window.profile))throw new Stop('test_profile_required');
+      if(argv.includes('--return-to-pickup'))await window.returnToTestPickup();
+      await waitFor(async()=>{const s=await window.call('standbyState',{product:expectedProduct(url)});return s.pickup_ready&&s.pickup_selected;},config.step_timeout_ms??20000);
+      await window.call('armPickupStandby',{product:expectedProduct(url),explicit_test_reset:true});
+    }
+    if(action==='prepare'&&argv.includes('--require-standby')){
+      const s=await window.call('standbyState',{product:expectedProduct(url)}),location=await window.call('locationState');
+      if(!s.ready||s.protected||s.expired||!s.pickup_selected||location.displayed_zip!==config.pickup_zip)throw new Stop('verified_pickup_standby_required');
+      stage('verified_standby_at');
+    }
+    if(action==='standby'&&argv.includes('--return-to-standby')){
+      // Explicit standalone test reset; never invoked by incoming inventory.
+      await window.goto('https://www.apple.com/shop/bag');
+      await waitFor(async()=>{const s=await window.call('snapshot');return s.ready==='complete'&&s.bag.length&&s.bag.every(i=>i.title&&i.quantity);},config.step_timeout_ms??20000);
+    }
+    result=action==='standby'?await prepareSafariStandby(window,url,config,{stage}):await prepareSafari(window,url,config,{seedOnly:action==='seed',stage});
     timestamps.finished_at=new Date().toISOString();save();
-    result.feedback=await signalSafari(window,result,{profile:window.profile,product:expectedProduct(url)});
+    result.feedback=await feedback();
     timestamps.feedback_completed_at=new Date().toISOString();save();console.log(JSON.stringify({...result,timestamps,report:out}));
+
     // Standalone harness does not reset carts or auto-run further requests.
     // A successful handoff retains a lock until the user explicitly releases it.
     if(result.status!=='awaiting_user')unlinkSync(lock);
-  }catch(e){result={status:'manual_review',reason:e instanceof Stop?e.code:'safari_test_failed'};timestamps.finished_at=new Date().toISOString();save();result.feedback=await signalSafari(window,result,{profile:window.profile,product:expectedProduct(url)});timestamps.feedback_completed_at=new Date().toISOString();save();console.log(JSON.stringify({...result,timestamps,report:out}));process.exitCode=1;}
+  }catch(e){result={status:'manual_review',reason:e instanceof Stop?e.code:'safari_test_failed'};timestamps.finished_at=new Date().toISOString();save();result.feedback=await feedback();timestamps.feedback_completed_at=new Date().toISOString();save();console.log(JSON.stringify({...result,timestamps,report:out}));process.exitCode=1;}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(async e=>{const result={status:'stopped',reason:e instanceof Stop?e.code:'safari_test_failed'};const i=process.argv.indexOf('--profile');result.feedback=await signalSafari(null,result,{profile:i>=0?process.argv[i+1]:'Safari'});console.error(JSON.stringify(result));process.exitCode=1;});

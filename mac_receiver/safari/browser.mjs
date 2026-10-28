@@ -29,7 +29,7 @@ export class SafariPickupBrowser {
   async prepare(event,stage){
     if(this.idleRefreshPromise)await this.idleRefreshPromise.catch(()=>{});
     await this.ensurePage();
-    const cfg={...this.config,handoff_event_id:event.event_id,test_any_available_store:false,pickup_details:{...this.config.pickup_details}};
+    const cfg={...this.config,handoff_event_id:event.event_id,pickup_first_available_store:true,test_any_available_store:false,pickup_details:{...this.config.pickup_details}};
     cfg.pickup_zip=process.env.APPLE_PICKUP_ZIP??(this.config.standby_page==='pickup_checkout'?this.config.pickup_zip:event.pickup_zip)??this.config.pickup_zip;
     if(event.store_name)cfg.pickup_details.store_name=/^Apple\s/.test(event.store_name)?event.store_name:'Apple '+event.store_name;
     const context={backend:'safari',profile:this.config.safari_profile,window_id:this.window.id,requested_store_name:cfg.pickup_details.store_name,requested_store_id:event.store_id};

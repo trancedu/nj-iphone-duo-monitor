@@ -32,7 +32,7 @@ export function chooseTimeWindow(options,dateLabel,c,now=new Date()) {
   const dayOffset=(date-today)/86400000;
   if(dayOffset<0||dayOffset>7) throw new Stop('pickup_date_unrecognized');
   const minutesNow=Number(parts.hour)*60+Number(parts.minute);
-  const choices=options.filter(o=>o.value&&!o.disabled).map(o=>{
+  const choices=options.filter(o=>o.value&&!o.disabled&&!/^(?:Available (?:Time )?Windows|Select (?:a |your )?(?:time|window))/i.test(o.label.trim())).map(o=>{
     const start=o.label.match(/^(\d{1,2}):(\d{2})\s*([ap])\.?m\.?/i);
     if(!start||+start[1]>12||+start[2]>59) throw new Stop('pickup_time_unrecognized');
     return {...o,lead:dayOffset*1440+(+start[1]%12+(start[3].toLowerCase()==='p'?12:0))*60+(+start[2])-minutesNow};

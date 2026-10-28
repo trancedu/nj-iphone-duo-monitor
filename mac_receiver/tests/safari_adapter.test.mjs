@@ -15,10 +15,10 @@ function fixture(options={}){
  const b=new SafariPickupBrowser(config,{listWindows:async()=>windows,Window,prepare:async(w,u,c,o)=>{calls.push({u,c,o});return {status:'awaiting_user'};},signal:async()=>({sound_played:true})});
  return {b,calls,setWindows:w=>windows=w};
 }
-test('Safari production routes to event store, requires that store, and preserves shared config',async()=>{
+test('Safari production chooses first available store while retaining event store for diagnostics',async()=>{
  const f=fixture();await f.b.start();
  assert.equal(await f.b.prepare({product_url:url,store_name:'Grand Central'},()=>{}),'awaiting_user');
- assert.equal(f.calls[0].c.pickup_details.store_name,'Apple Grand Central');assert.equal(f.calls[0].c.test_any_available_store,false);
+ assert.equal(f.calls[0].c.pickup_details.store_name,'Apple Grand Central');assert.equal(f.calls[0].c.test_any_available_store,false);assert.equal(f.calls[0].c.pickup_first_available_store,true);
  assert.equal(f.b.config.pickup_details.store_name,'Apple West 14th Street');
 });
 test('Safari production missing/ambiguous profile or extra tab refuses execution',async()=>{

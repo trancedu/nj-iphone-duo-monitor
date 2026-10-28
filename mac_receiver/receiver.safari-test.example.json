@@ -3,7 +3,7 @@
   "pickup_zip": "07094",
   "pickup_unavailable_retries": 2,
   "pickup_retry_interval_ms": 1000,
-  "test_any_available_store": true,
+  "pickup_first_available_store": true,
   "pickup_details": {
     "store_name": "Apple West 14th Street",
     "preferred_slot": 2,
@@ -14,5 +14,8 @@
     "phone": "2025550123"
   },
   "handoff_idle_timeout_seconds": 600,
-  "idle_bag_refresh_interval_seconds": 300
+  "idle_bag_refresh_interval_seconds": 300,
+  "standby_page": "pickup_checkout",
+  "speech_enabled": false,
+  "open_apple_pay_sheet": false
 }
