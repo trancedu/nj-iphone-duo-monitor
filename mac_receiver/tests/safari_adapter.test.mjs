@@ -85,3 +85,11 @@ test('expired pickup restore rechecks inventory before touching page',async()=>{
  f.b.window.call=async()=>({pickup_expiry_confirmed:false});f.b.window.goto=async()=>navigated++;
  await assert.rejects(()=>f.b.restoreExpiredPickup(),e=>e.code==='pickup_expiry_no_longer_confirmed');assert.equal(navigated,0);
 });
+
+test('confirmed expired stock reuses pickup page without reload, navigation or reseeding',async()=>{
+ const f=fixture({pickup_zip:'07094'});await f.b.start();const calls=[];
+ f.b.window.call=async(op,args)=>{calls.push({op,args});return {rearmed:true,ready:true,protected:false,expired:false,pickup_selected:true};};
+ f.b.window.goto=async()=>{throw Error('must not navigate');};f.b.seedIdle=async()=>{throw Error('must not seed');};
+ assert.equal((await f.b.restoreExpiredPickup()).status,'standby_checkout');
+ assert.deepEqual(calls.map(c=>c.op),['rearmExpiredPickupStandby']);assert.equal(calls[0].args.zip,'07094');
+});

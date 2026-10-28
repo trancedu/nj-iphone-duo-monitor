@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 import uuid
 from monitor import load_env
-from pickup_bridge import NoRedirect, valid_product_url
+from pickup_bridge import NoRedirect, valid_product_url, private_bridge_ipv4
 
 
 def main():
@@ -39,8 +39,8 @@ def main():
     from urllib.parse import urlsplit
     u = urlsplit(base)
     ip = ipaddress.ip_address(u.hostname)
-    if u.scheme not in ('http', 'https') or not ip.is_private or ip.is_unspecified or u.username or u.password or u.query or u.fragment or u.path:
-        p.error('endpoint must be a private IP base URL')
+    if u.scheme not in ('http', 'https') or not private_bridge_ipv4(ip) or ip.is_unspecified or u.username or u.password or u.query or u.fragment or u.path:
+        p.error('endpoint must be a private LAN or Tailscale IPv4 base URL')
     secret = os.environ.get(cfg.get('secret_env', 'PICKUP_SHARED_SECRET'), '')
     if len(secret) < 32: p.error('shared secret missing or too short')
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())

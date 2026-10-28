@@ -7,7 +7,7 @@ import {once} from 'node:events';
 import {setImmediate as nextTurn} from 'node:timers/promises';
 import {createReceiver} from '../server.mjs';
 import {Engine} from '../engine.mjs';
-import {Stop,productURL,expectedProduct,validateEvent} from '../protocol.mjs';
+import {Stop,productURL,expectedProduct,validateEvent,privateIPv4} from '../protocol.mjs';
 const SECRET='test-only-not-production-'.repeat(3);
 const URL='https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-256gb-star-white-unlocked';
 const event=(id='event-one')=>({event_id:id,detected_at:'2026-10-26T12:00:00Z',product_url:URL});
@@ -161,4 +161,10 @@ test('confirmed expired inventory after selection restores and releases immediat
  const h=await harness(t,false,browser);h.config.auto_release_unavailable=true;
  await h.request('/prepare',event());await nextTurn();await nextTurn();assert.equal(restores,1);assert.equal(h.engine.state.active,null);assert.equal(h.engine.state.events['event-one'].status,'pickup_expired');
  fail=true;await h.request('/prepare',event('changed-stock'));await nextTurn();await nextTurn();assert.equal(h.engine.state.active,'changed-stock');assert.equal(h.engine.state.events['changed-stock'].reason,'standby_restore_failed');
+});
+
+
+test('receiver admits Tailscale transport addresses without accepting public address ranges',()=>{
+ for(const ip of ['100.64.0.0','100.103.212.49','100.83.108.82','100.127.255.255','192.168.31.35'])assert.equal(privateIPv4(ip),true,ip);
+ for(const ip of ['100.63.255.255','100.128.0.0','8.8.8.8','0.0.0.0','::1'])assert.equal(privateIPv4(ip),false,ip);
 });

@@ -7,7 +7,7 @@ export class Stop extends Error {
 export function privateIPv4(ip) {
   if (net.isIP(ip) !== 4) return false;
   const [a,b] = ip.split('.').map(Number);
-  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
 }
 export const normalizeIP = ip => ip?.replace(/^::ffff:/, '');
 export function authorized(header, secret) {

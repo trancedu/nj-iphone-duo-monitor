@@ -43,6 +43,14 @@ export function safariDOM({op,args={}}) {
     if(candidates.length!==1)fail('session_continue_missing_or_ambiguous');
     click(candidates[0]);return {clicked:true};
   }
+  if(op==='rearmExpiredPickupStandby'){
+    // Called only after a stopped/finished request; validate live inventory atomically.
+    const d=safariDOM({op:'diagnosticState',args}),state=safariDOM({op:'standbyState',args});
+    if(d.pickup_expiry_confirmed!==true||d.page.state!=='Fulfillment-init'||d.displayed_zip!==args.zip||!state.pickup_selected||state.expired||state.session_warning)return {rearmed:false};
+    window.__duoPickupStoreSelected=false;
+    window.__duoPickupContinueRequested=false;
+    return {rearmed:true,...safariDOM({op:'armPickupStandby',args})};
+  }
   if(op==='armPickupStandby'){
     const heading=all('h1,h2').some(e=>/How would you like to get your order\?/i.test(norm(e.textContent)));
     if((!args.explicit_test_reset&&window.__duoPickupStoreSelected)||window.__duoApplePayRequested||document.getElementById('co-options-applePay'))fail('standby_checkout_protected');

@@ -75,3 +75,18 @@ class BridgeTests(unittest.TestCase):
             with bridge.connect() as c:self.assertEqual(c.execute('SELECT phase FROM events').fetchone()[0],'watching')
             with patch.object(bridge,'request',return_value=(200,{'event_id':eid,'status':'awaiting_user'})):bridge.tick(1006)
             with bridge.connect() as c:self.assertEqual(c.execute('SELECT phase,result FROM events').fetchone(),('done','awaiting_user'))
+
+
+class TailscaleTransportTests(unittest.TestCase):
+    def test_exact_shared_address_range_and_existing_lan_support(self):
+        for value in ['100.64.0.0','100.103.212.49','100.83.108.82','100.127.255.255','192.168.31.35','127.0.0.1']:
+            self.assertTrue(b.private_bridge_ipv4(value),value)
+        for value in ['100.63.255.255','100.128.0.0','8.8.8.8','0.0.0.0','::1','invalid']:
+            self.assertFalse(b.private_bridge_ipv4(value),value)
+    def test_tailscale_sender_preserves_authentication_and_url_restrictions(self):
+        with tempfile.TemporaryDirectory() as path:
+            bridge=b.Bridge({'endpoint':'http://100.103.212.49:8765/prepare'},'test-secret-'*4,path,lambda _:None,autostart=False)
+            self.assertEqual(bridge.config['endpoint'],'http://100.103.212.49:8765/prepare')
+            for url in ['http://100.128.0.0:8765/prepare','http://100.103.212.49:8765/prepare?token=x','http://user:pass@100.103.212.49:8765/prepare']:
+                with self.assertRaises(ValueError):b.Bridge({'endpoint':url},'test-secret-'*4,path,lambda _:None,autostart=False)
+            with self.assertRaises(ValueError):b.Bridge({'endpoint':'http://100.103.212.49:8765/prepare'},'short',path,lambda _:None,autostart=False)

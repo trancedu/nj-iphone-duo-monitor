@@ -254,3 +254,39 @@ test('expiry confirmation requires settled unavailable inventory for matching pr
  await f.page.evaluate(()=>window.__duoApplePayRequested=true);
  assert.equal((await read()).pickup_expiry_confirmed,false);
 });
+
+test('expired stock resets task markers in place without clicking; available stock remains protected',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','/checkout?_s=Fulfillment-init');document.body.insertAdjacentHTML('beforeend','<button>07094</button>');});
+ await f.page.evaluate(()=>{window.__duoPickupStoreSelected=true;window.__duoPickupContinueRequested=true;window.clicks=0;document.addEventListener('click',()=>window.clicks++);});
+ const rearm=()=>f.window.call('rearmExpiredPickupStandby',{product,zip:'07094'});
+ const state=await rearm();assert.equal(state.rearmed,true);assert.equal(state.ready,true);
+ assert.equal(await f.page.evaluate(()=>window.clicks),0);assert.equal(await f.page.evaluate(()=>window.__duoPickupContinueRequested),false);
+ await f.page.evaluate(()=>{window.__duoPickupStoreSelected=true;window.__duoPickupContinueRequested=true;});
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>e.disabled=false);
+ assert.equal((await rearm()).rearmed,false);assert.equal(await f.page.evaluate(()=>window.__duoPickupStoreSelected),true);assert.equal(await f.page.evaluate(()=>window.__duoPickupContinueRequested),true);
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>e.disabled=true);
+ assert.equal((await f.window.call('rearmExpiredPickupStandby',{product,zip:'00000'})).rearmed,false);
+ await f.page.evaluate(()=>window.__duoApplePayRequested=true);
+ assert.equal((await rearm()).rearmed,false);
+});
+
+test('stuck session warning rebuilds idle checkout instead of waiting twenty seconds',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>document.body.insertAdjacentHTML('beforeend','<div role="dialog"><h2>Are you still shopping?</h2><button>I’m still shopping</button></div>'));
+ const result=await prepareSafariStandby(f.window,url,cfg);
+ assert.equal(result.status,'standby_checkout');assert.equal((await f.window.call('standbyState',{product})).session_warning,false);
+ assert.deepEqual(f.counts(),{bagLoads:2,checkoutLoads:2});
+});
+test('stuck session warning on protected checkout never rebuilds',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{window.__duoPickupStoreSelected=true;document.body.insertAdjacentHTML('beforeend','<div role="dialog"><h2>Are you still shopping?</h2><button>I’m still shopping</button></div>');});
+ await assert.rejects(()=>prepareSafariStandby(f.window,url,cfg),e=>e.code==='session_warning_on_protected_page');
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:1});
+});
+test('maintenance rotates through all six slots even when earlier slots remain due',async()=>{
+ const seen=[];const slots=Array.from({length:6},(_,i)=>({engine:{state:{active:null,events:{}}},browser:{refreshStandby:()=>{seen.push(i);return Promise.resolve({status:'checked'});}}}));
+ const router=new ProfileRouter({browser_backend:'safari'},slots);
+ for(let i=0;i<6;i++)await router.maintainStandby();
+ assert.deepEqual(seen,[0,1,2,3,4,5]);
+});

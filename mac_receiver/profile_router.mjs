@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {openReceiverListeners} from './listeners.mjs';
 import {readFileSync,mkdirSync,openSync,closeSync,writeFileSync,existsSync,unlinkSync,renameSync} from 'node:fs';
 import {resolve,dirname,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -155,7 +156,9 @@ export class ProfileRouter {
   expireHeld(){for(const s of this.slots)s.engine.expireHeld();this.expireWaiting();}
   async maintainStandby(nowMs=Date.now()){
     if(this.standbyMaintenancePromise||this.slots.some(s=>s.engine.releasing||s.engine.signaling||s.browser.requestReservations||['queued','running'].includes(s.engine.state.events[s.engine.state.active]?.status)))return false;
-    for(const slot of this.slots){
+    const start=this.standbyCursor||0;
+    for(let offset=0;offset<this.slots.length;offset++){
+      const index=(start+offset)%this.slots.length,slot=this.slots[index];
       const engine=slot.engine,item=engine.state.events[engine.state.active];
       // A reserved event not yet in Engine is about to execute. Yield all I/O.
       if(this.globalLock?.event_id&&!this.slotForEvent(this.globalLock.event_id))return false;
@@ -167,6 +170,7 @@ export class ProfileRouter {
       }:undefined;
       const task=slot.browser.refreshStandby?.(nowMs,{expiredOnly:!!this.globalLock?.event_id||!!item,recovering:item?.status==='session_expired_recovering'&&!!item.timestamps.checkout_session_expired_at,onExpired});
       if(!task)continue;
+      this.standbyCursor=(index+1)%this.slots.length;
       const managed=(async()=>{
         const result=await task;
         if(item&&engine.state.active===item.event_id&&item.status==='session_expired_recovering'&&item.timestamps.checkout_session_expired_at&&result?.status==='standby_checkout'){
@@ -187,7 +191,7 @@ export class ProfileRouter {
   health(){
     const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],...s.engine.health()}));
     this.expireWaiting();
-    return {status:'ok',busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.config.protect_stock_from_timeout!==false&&this.stockProtected(),protect_stock_from_timeout:this.config.protect_stock_from_timeout!==false,recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
+    return {status:'ok',...(this.config.listener_status?{listener_status:this.config.listener_status}:{}),busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.config.protect_stock_from_timeout!==false&&this.stockProtected(),protect_stock_from_timeout:this.config.protect_stock_from_timeout!==false,recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
   }
 }
 
@@ -216,7 +220,7 @@ export async function main() {
   if(cfg.recent_request_ttl_seconds!==undefined&&(!Number.isInteger(cfg.recent_request_ttl_seconds)||cfg.recent_request_ttl_seconds<0||cfg.recent_request_ttl_seconds>10))throw new Stop('invalid_recent_request_ttl');
   if(cfg.global_lock_timeout_seconds!==undefined&&(!Number.isInteger(cfg.global_lock_timeout_seconds)||cfg.global_lock_timeout_seconds<0||cfg.global_lock_timeout_seconds>86400))throw new Stop('invalid_global_lock_timeout');
   if(cfg.global_lock_timeout_seconds&&(!cfg.single_active_request||!cfg.global_timeout_python||!cfg.global_timeout_unlock_script||!existsSync(cfg.global_timeout_python)||!existsSync(cfg.global_timeout_unlock_script)))throw new Stop('global_timeout_helper_required');
-  const paths=[];let server,local,pollTimer,timeoutTimer;
+  const paths=[];let server,local,pollTimer,timeoutTimer,listeners;
   function lock(dir){
     mkdirSync(dir,{recursive:true,mode:0o700});const path=join(dir,'receiver.lock');
     if(existsSync(path)){const pid=Number(readFileSync(path));try{process.kill(pid,0);throw new Stop('profile_already_running');}catch(e){if(e instanceof Stop||e.code!=='ESRCH')throw e;unlinkSync(path);}}
@@ -261,10 +265,10 @@ export async function main() {
     }
     if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());await router.maintainStandby();for(const slot of slots){if(!slot.engine.state.active&&!slot.engine.releasing&&!slot.engine.signaling)slot.browser.refreshIdleBag?.().catch(()=>{});await slot.engine.watchIdle();}}catch{}finally{polling=false;}},2000);pollTimer.unref();}
     ({server}=createReceiver(cfg,{ready:()=>true},secret,router));
-    await new Promise((ok,bad)=>{server.once('error',bad);server.listen(cfg.port,cfg.host,ok);});
-    if(!cfg.host.startsWith('127.')){local=http.createServer(server.listeners('request')[0]);local.requestTimeout=5000;local.headersTimeout=5000;local.timeout=5000;await new Promise((ok,bad)=>{local.once('error',bad);local.listen(cfg.port,'127.0.0.1',ok);});}
+    listeners=await openReceiverListeners(server,cfg,{onStatus:state=>console.info(JSON.stringify({event:'receiver_listener_status',...state,at:new Date().toISOString()}))});
+    cfg.listener_status=listeners.state;
     console.log(JSON.stringify({status:'listening',mode:cfg.dry_run?'dry_run':'live',profiles:slots.map(s=>({label:s.label,product_url:s.product_url,aliases:s.aliases||[]}))}));
-    const stop=()=>{clearInterval(pollTimer);clearInterval(timeoutTimer);server.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);process.exit(0);};process.on('SIGINT',stop);process.on('SIGTERM',stop);
-  }catch(e){clearInterval(pollTimer);clearInterval(timeoutTimer);server?.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);throw e;}
+    const stop=()=>{clearInterval(pollTimer);clearInterval(timeoutTimer);listeners?.close();server.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);process.exit(0);};process.on('SIGINT',stop);process.on('SIGTERM',stop);
+  }catch(e){clearInterval(pollTimer);clearInterval(timeoutTimer);listeners?.close();server?.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);throw e;}
 }
-if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(e=>{console.error(JSON.stringify({status:'stopped',reason:e instanceof Stop?e.code:'router_start_failed'}));process.exit(1);});
+if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(e=>{console.error(JSON.stringify({status:'stopped',reason:e instanceof Stop?e.code:'router_start_failed',error_code:typeof e.code==='string'?e.code:null,error_type:e.name}));process.exit(1);});

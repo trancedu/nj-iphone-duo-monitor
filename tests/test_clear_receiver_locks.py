@@ -184,8 +184,9 @@ export class SafariWindow{
  constructor(id){this.id=id;this.pickup=(cfg.initialReady||[]).includes(id);}
  async goto(){appendFileSync(root+'/navigated',String(this.id)+'\\n');this.pickup=false;}
  async call(op){
+  if(op==='rearmExpiredPickupStandby')return cfg.expiredMarker===this.id?{rearmed:true,ready:true,pickup_selected:true,protected:false,expired:false}:{rearmed:false};
   if(op==='snapshot')return {url:'https://www.apple.com/shop/bag',ready:'complete',bag:[{title:cfg.slots[this.id].product_url,quantity:'1'}]};
-  if(op==='standbyState')return {ready:this.pickup,matching_product:true,checkout:true,pickup_ready:this.pickup,protected:false,expired:false,pickup_selected:this.pickup};
+  if(op==='standbyState')return {ready:this.pickup,matching_product:true,checkout:true,pickup_ready:this.pickup,protected:cfg.expiredMarker===this.id,expired:false,pickup_selected:this.pickup};
   if(op==='locationState')return {displayed_zip:cfg.badZip&&this.id===5?'00000':'07094'};
  }
 }
@@ -218,7 +219,31 @@ export const prepareSafariStandby=async(w,url,config)=>{
             rows=json.loads(run().stdout)
             self.assertTrue(all(r.get('unchanged') for r in rows))
             self.assertFalse((root/'navigated').exists());self.assertFalse((root/'prepared').exists())
+            cfg['expiredMarker']=5;(root/'receiver.router.local.json').write_text(json.dumps(cfg))
+            rows=json.loads(run().stdout)
+            self.assertTrue(rows[5]['rearmed']);self.assertTrue(rows[5]['unchanged'])
+            self.assertFalse((root/'navigated').exists());self.assertFalse((root/'prepared').exists())
+            # Explicit rebuild mode ignores the healthy-page shortcut for all six.
+            cfg.pop('expiredMarker');(root/'receiver.router.local.json').write_text(json.dumps(cfg))
+            rebuilt=subprocess.run([node,'--input-type=module','-e',cleaner.RESTORE,str(root),'','rebuild-checkout'],capture_output=True,text=True,check=True)
+            rows=json.loads(rebuilt.stdout)
+            self.assertTrue(all(r['restored'] and not r.get('unchanged') for r in rows))
+            self.assertEqual((root/'navigated').read_text().splitlines(),list('012345'))
+            self.assertEqual((root/'prepared').read_text().splitlines(),['url-'+label for label in 'ABCDEF'])
 
+
+
+
+class ManualRebuildGuardTests(unittest.TestCase):
+    def test_global_or_profile_task_blocks_rebuild(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);gate=root/'global-lock.json';state=root/'events.json'
+            cfg={'slots':[{'state_dir':str(root)}]}
+            gate.write_text(json.dumps({'event_id':'active'}))
+            with self.assertRaises(RuntimeError):cleaner.assert_rebuild_idle(cfg,gate)
+            gate.write_text(json.dumps({'event_id':None}));state.write_text(json.dumps({'active':'active'}))
+            with self.assertRaises(RuntimeError):cleaner.assert_rebuild_idle(cfg,gate)
+            state.write_text(json.dumps({'active':None}));cleaner.assert_rebuild_idle(cfg,gate)
 
 
 if __name__ == '__main__':

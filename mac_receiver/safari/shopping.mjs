@@ -61,14 +61,23 @@ export async function waitFor(fn,timeout=20000,interval=100) {
   throw new Stop('safari_step_timeout');
 }
 // Only the unselected fulfillment page is eligible for standby refresh.
-export async function prepareSafariStandby(window,url,config,{refresh=false,stage=()=>{}}={}){
+export async function prepareSafariStandby(window,url,config,{refresh=false,stage=()=>{},sessionContinuationAttempted=false}={}){
   const product=expectedProduct(url),call=(op,args={})=>window.call(op,{product,...args});
   const wait=fn=>waitFor(fn,config.step_timeout_ms??20000);
   let state=await call('standbyState');
   if(state.session_warning){
-    await call('continueShoppingSession');
-    await wait(async()=>!(await call('standbyState')).session_warning);
+    if(!sessionContinuationAttempted){
+      await call('continueShoppingSession');
+      try{await waitFor(async()=>!(await call('standbyState')).session_warning,Math.min(config.step_timeout_ms??20000,2000),250);}
+      catch(error){if(!(error instanceof Stop&&error.code==='safari_step_timeout'))throw error;}
+    }
     state=await call('standbyState');
+    if(state.session_warning){
+      if(state.protected)throw new Stop('session_warning_on_protected_page');
+      await window.goto('https://www.apple.com/shop/bag');
+      await wait(async()=>{const s=await call('snapshot');return new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete';});
+      state=await call('standbyState');
+    }
   }
   if(state.protected)throw new Stop('standby_checkout_protected');
   if(!state.ready){

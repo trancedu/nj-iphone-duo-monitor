@@ -19,6 +19,16 @@ from contextlib import contextmanager
 LOG = logging.getLogger('pickup.bridge')
 
 
+def private_bridge_ipv4(value):
+    """Allowed transport ranges; each receiver still enforces exact source IPs and a secret."""
+    try:
+        address = ipaddress.ip_address(value)
+        return address.version == 4 and any(address in ipaddress.ip_network(cidr) for cidr in (
+            '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '100.64.0.0/10'))
+    except ValueError:
+        return False
+
+
 def valid_product_url(value):
     try:
         u = urllib.parse.urlsplit(value)
@@ -38,7 +48,7 @@ class Bridge:
     def __init__(self, config, secret, runtime, notify, autostart=True):
         u = urllib.parse.urlsplit(config['endpoint'])
         host = ipaddress.ip_address(u.hostname)
-        lan = any(host in ipaddress.ip_network(cidr) for cidr in ('127.0.0.0/8','10.0.0.0/8','172.16.0.0/12','192.168.0.0/16')) if host.version == 4 else False
+        lan = private_bridge_ipv4(host)
         if (u.scheme not in ('http', 'https') or not lan or
                 host.is_unspecified or u.username or u.password or u.query or u.fragment or u.path != '/prepare'):
             raise ValueError('invalid_bridge_endpoint')

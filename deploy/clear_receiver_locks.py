@@ -39,6 +39,7 @@ const {SafariWindow,listSafariWindows,waitFor,prepareSafariStandby}=await import
 const {expectedProduct}=await import(pathToFileURL(root+'/protocol.mjs'));
 const cfg=JSON.parse(readFileSync(root+'/receiver.router.local.json'));
 const onlySlot=process.argv[2]||null;
+const forceCheckout=process.argv[3]==='rebuild-checkout';
 const windows=cfg.browser_backend==='safari'?await listSafariWindows():[],results=[];
 for(const slot of cfg.slots){
   if(onlySlot&&slot.label!==onlySlot)continue;
@@ -54,7 +55,7 @@ for(const slot of cfg.slots){
     const matches=windows.filter(w=>w.name.startsWith(slot.safari_profile+' — '));
     if(matches.length!==1||matches[0].tabs!==1)throw Error('profile_window_missing_or_ambiguous');
     const window=new SafariWindow(matches[0].id,slot.safari_profile);
-    if(cfg.standby_page==='pickup_checkout'){
+    if(cfg.standby_page==='pickup_checkout'&&!forceCheckout){
       const state=await window.call('standbyState',{product:expectedProduct(slot.product_url)});
       if(state.ready&&state.matching_product&&state.checkout&&state.pickup_ready&&state.pickup_selected&&!state.protected&&!state.expired&&!state.session_warning){
         const location=await window.call('locationState');
@@ -62,6 +63,11 @@ for(const slot of cfg.slots){
           results.push({slot:slot.label,restored:true,unchanged:true,page:'pickup_checkout',zip:location.displayed_zip});
           continue; // Verified standby: no navigation, reload, click or form write.
         }
+      }
+      const reused=await window.call('rearmExpiredPickupStandby',{product:expectedProduct(slot.product_url),zip:cfg.pickup_zip});
+      if(reused.rearmed&&reused.ready&&!reused.protected&&!reused.expired&&reused.pickup_selected){
+        results.push({slot:slot.label,restored:true,unchanged:true,rearmed:true,page:'pickup_checkout',zip:cfg.pickup_zip});
+        continue; // Confirmed expired stock on the correct page: reset task markers only.
       }
     }
     await window.goto('https://www.apple.com/shop/bag');
@@ -88,7 +94,9 @@ process.exit(0); // Disconnect CDP without closing Chrome.
 def main():
     global ROOT
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--expired-event', help='Automatic timeout: cancel only this still-expired lock owner')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--expired-event', help='Automatic timeout: cancel only this still-expired lock owner')
+    mode.add_argument('--rebuild-checkout', action='store_true', help='Manual only: rebuild every idle Safari checkout through its verified Bag')
     args = parser.parse_args()
     plist = Path.home() / 'Library/LaunchAgents/com.trancedu.apple-pickup-router.plist'
     argv = plistlib.loads(plist.read_bytes())['ProgramArguments']
@@ -106,6 +114,10 @@ def main():
         if not gate_dir.is_absolute():
             gate_dir = ROOT / gate_dir
         gate = gate_dir / 'global-lock.json'
+        if args.rebuild_checkout:
+            if cfg.get('browser_backend') != 'safari' or cfg.get('standby_page') != 'pickup_checkout':
+                raise RuntimeError('rebuild_requires_safari_pickup_standby')
+            assert_rebuild_idle(cfg, gate)
         if args.expired_event:
             lock = json.loads(gate.read_text()) if gate.exists() else {}
             if not expired_owner(cfg, lock, args.expired_event):
@@ -119,6 +131,12 @@ def main():
             time.sleep(.1)
         else:
             raise RuntimeError('receiver_did_not_stop')
+        if args.rebuild_checkout:
+            try:
+                assert_rebuild_idle(cfg, gate)
+            except RuntimeError:
+                subprocess.run(['launchctl', 'kickstart', JOB], check=True, timeout=5)
+                raise
         backup = ROOT.parent / 'deployment-backups' / f'clear-to-bag-{time.time_ns()}'
         backup.mkdir(parents=True, mode=0o700)
         # Recheck after stopping: never reset a new owner using a stale timer.
@@ -177,12 +195,12 @@ def main():
         if not node:
             raise RuntimeError('node_not_found_receiver_left_stopped')
         total_profiles = len(cfg['slots'])
-        print('恢复超时 Profile……' if args.expired_event else f'检查全部 {total_profiles} 个窗口（' + '、'.join(entry['label'] for entry in cfg['slots']) + '）；仅修复未就绪页面，不加购、不付款……', flush=True)
+        print('手动重建全部 Checkout 会话；将依次经过购物车，重新设置自提及邮编……' if args.rebuild_checkout else '恢复超时 Profile……' if args.expired_event else f'检查全部 {total_profiles} 个窗口（' + '、'.join(entry['label'] for entry in cfg['slots']) + '）；仅修复未就绪页面，不加购、不付款……', flush=True)
         if args.expired_event and owner_slot is None:
             restored = []  # An orphaned reservation has no browser task to restore.
         else:
             try:
-                result = subprocess.run([node, '--input-type=module', '-e', RESTORE, str(ROOT), owner_slot or ''],
+                result = subprocess.run([node, '--input-type=module', '-e', RESTORE, str(ROOT), owner_slot or ''] + (['rebuild-checkout'] if args.rebuild_checkout else []),
                                         capture_output=True, text=True, timeout=75 if args.expired_event else max(90, 75 * total_profiles))
                 if result.returncode:
                     raise RuntimeError('bag_restore_failed_receiver_left_stopped')
@@ -234,6 +252,19 @@ def main():
         if cfg.get('standby_page') == 'pickup_checkout' and not failures:
             print(f"已验证 I’ll pick it up 和邮编 {cfg.get('pickup_zip', '未配置')}；未选门店、未付款。")
         return 1 if failures else 0
+
+
+def assert_rebuild_idle(config, gate):
+    lock = json.loads(gate.read_text()) if gate.exists() else {}
+    if lock.get('event_id'):
+        raise RuntimeError('当前有任务占锁，未重建页面；请先完成操作或主动清锁')
+    for slot in config['slots']:
+        directory = Path(slot['state_dir'])
+        if not directory.is_absolute():
+            directory = ROOT / directory
+        path = directory / 'events.json'
+        if path.exists() and json.loads(path.read_text()).get('active'):
+            raise RuntimeError('当前有任务尚未结束，未重建页面；请先完成操作或主动清锁')
 
 
 def expired_owner(config, lock, event_id, now=None):

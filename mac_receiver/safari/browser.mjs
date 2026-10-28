@@ -51,11 +51,11 @@ export class SafariPickupBrowser {
     }
   }
   async restoreExpiredPickup(){
-    const d=await this.window.call('diagnosticState',{product:expectedProduct(this.activeProductURL||this.config.preseeded_product_url)});
-    if(d.pickup_expiry_confirmed!==true||d.page?.state!=='Fulfillment-init'||d.displayed_zip!==(process.env.APPLE_PICKUP_ZIP??this.config.pickup_zip))throw new Stop('pickup_expiry_no_longer_confirmed');
-    await this.window.goto('https://www.apple.com/shop/bag');
-    await waitFor(async()=>{const s=await this.window.call('snapshot');return new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete'&&s.bag.length===1&&s.bag[0].title===expectedProduct(this.activeProductURL||this.config.preseeded_product_url)&&s.bag[0].quantity==='1';},this.config.step_timeout_ms||20000);
-    return this.seedIdle();
+    const product=expectedProduct(this.activeProductURL||this.config.preseeded_product_url);
+    const zip=process.env.APPLE_PICKUP_ZIP??this.config.pickup_zip;
+    const state=await this.window.call('rearmExpiredPickupStandby',{product,zip});
+    if(!state.rearmed||!state.ready||state.protected||state.expired||!state.pickup_selected)throw new Stop('pickup_expiry_no_longer_confirmed');
+    return {status:'standby_checkout',product,zip,unchanged:true};
   }
   async seedIdle(){
     await this.ensurePage();
@@ -109,7 +109,19 @@ export class SafariPickupBrowser {
         this.lastSessionCheck={at:new Date(now).toISOString(),status:state.expired?'expired':state.protected?'protected':state.ready?'ready':'unknown'};
         if(state.session_warning){
           await this.window.call('continueShoppingSession');
-          await waitFor(async()=>!(await this.window.call('standbyState',{product:expectedProduct(this.config.preseeded_product_url)})).session_warning,this.config.step_timeout_ms||20000,500);
+          this.lastSessionCheck.status='session_warning';
+          try{await waitFor(async()=>!(await this.window.call('standbyState',{product:expectedProduct(this.config.preseeded_product_url)})).session_warning,Math.min(this.config.step_timeout_ms||20000,2000),250);}
+          catch(error){
+            if(!(error instanceof Stop&&error.code==='safari_step_timeout'))throw error;
+            if(state.protected){this.lastSessionCheck.status='protected';return {status:'protected'};}
+            if(now<(this.nextSessionRecoveryAt||0))return {status:'backoff'};
+            this.nextSessionRecoveryAt=now+180000;
+            const result=await this.standby(this.window,this.config.preseeded_product_url,this.config,{sessionContinuationAttempted:true});
+            this.lastIdleRefreshAt=now;this.nextSessionRecoveryAt=0;this.sessionRecoveryPending=false;
+            this.lastSessionCheck.status='recovered';
+            console.info(JSON.stringify({event:'checkout_session_warning_recovery',profile:this.config.safari_profile,status:'recovered',at:new Date().toISOString()}));
+            return result;
+          }
           this.lastSessionCheck.status='session_continued';this.lastIdleRefreshAt=now;
           console.info(JSON.stringify({event:'checkout_session_continued',profile:this.config.safari_profile,at:new Date().toISOString()}));
           return {status:'session_continued'};
