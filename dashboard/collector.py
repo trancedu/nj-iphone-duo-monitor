@@ -197,8 +197,8 @@ class Collector:
                 if active is None:
                     active={'store_id':sid,'sku':sku,'store':point['store'],'state':point['state'],
                             'start':point['t'],'last_seen':point['t'],'end':None,'end_evidence':None,
-                            'end_reason':'unknown','pickup_dates':[],'observations':0}
-                active['last_seen']=max(active['last_seen'],point['t']);active['observations']+=1
+                            'end_reason':'unknown','pickup_dates':[],'evidence_records':0}
+                active['last_seen']=max(active['last_seen'],point['t']);active['evidence_records']+=1
                 if point['pickup_date'] and point['pickup_date'] not in active['pickup_dates']:
                     active['pickup_dates'].append(point['pickup_date'])
             if active:
@@ -210,7 +210,9 @@ class Collector:
                 segment.update(segment_number=number,
                     is_current=bool(latest and latest['eligible'] and segment['end'] is None and
                                     segment is segments[-1] and latest['t']>=segment['start']-2),
-                    observed_span_seconds=round(segment['last_seen']-segment['start'],3))
+                    observed_span_seconds=round(segment['last_seen']-segment['start'],3),
+                    duration_lower_seconds=round(segment['last_seen']-segment['start'],3),
+                    duration_upper_seconds=round(segment['end']-segment['start'],3) if segment['end'] is not None else None)
                 periods.append(segment)
         return sorted(periods,key=lambda row:row['start'],reverse=True)
 
@@ -244,7 +246,7 @@ class Collector:
             except (ValueError,TypeError):safe_monitor[key]=None
         result={'generated_at':now,'timezone':'America/New_York','monitor':safe_monitor,
             'metrics':{str(m):self.metrics(m,now) for m in (5,30,60)},'stores':current,'products':self.products,
-            'periods':periods,'history_rules':{'merge_across_unavailable':False,'duration_basis':'last_positive_minus_first_positive','observation_gap_seconds':120},'queries':queries,'chart':chart,'collector':{'last_snapshot':float(self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone()[0]) if self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone() else None,'bad_lines':self.bad_lines},
+            'periods':periods,'history_rules':{'merge_across_unavailable':False,'duration_basis':'last_positive_to_first_negative_range','observation_gap_seconds':120},'queries':queries,'chart':chart,'collector':{'last_snapshot':float(self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone()[0]) if self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone() else None,'bad_lines':self.bad_lines},
             'evidence_notes':['库存范围：可选门店且取货日期在当天至未来三天。','query_empty：历史查询确认当次覆盖范围无符合条件库存，消失时刻为推断上界。','snapshot：独立观察到该门店/规格不再符合条件；查询失败不视为无货。','首次/最后观察不是物理补货/售罄精确时刻；未覆盖的历史结束时间保持未知。']}
         self.output.parent.mkdir(parents=True,exist_ok=True);temp=self.output.with_suffix('.tmp');temp.write_text(json.dumps(result,ensure_ascii=False,separators=(',',':')));temp.replace(self.output)
         return result

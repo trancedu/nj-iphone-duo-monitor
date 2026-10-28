@@ -1,8 +1,10 @@
 'use strict';
 let data, windowMinutes='30', historyPage=0, queryPage=0, fetching=false;
-const duration=seconds=>{if(seconds==null)return '—';if(seconds<1)return '不足 1 秒';const n=Math.round(seconds),h=Math.floor(n/3600),m=Math.floor(n%3600/60),v=n%60;return (h?h+' 时 ':'')+(m?m+' 分 ':'')+v+' 秒';};
+const duration=seconds=>{if(seconds==null)return '未知';const ms=Math.max(0,Math.round(seconds*1000)),h=Math.floor(ms/3600000),m=Math.floor(ms%3600000/60000),v=(ms%60000)/1000;return (h?h+' 时 ':'')+(m?m+' 分 ':'')+v+' 秒';};
 const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const dateTime=new Intl.DateTimeFormat('zh-CN',{timeZone:'America/New_York',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+const preciseTime=new Intl.DateTimeFormat('zh-CN',{timeZone:'America/New_York',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3,hour12:false});
+const fmtPrecise=t=>t!=null?preciseTime.format(new Date(t*1000)):'—';
 const fmt=t=>t?dateTime.format(new Date(t*1000)):'—', sec=n=>n==null?'—':Number(n).toFixed(2), age=t=>t?Math.max(0,Date.now()/1000-t):Infinity;
 const short=sku=>(data.products[sku]?.name||sku).replace('iPhone Duo ','').replace('Star White','白色').replace('Night Sky','黑色');
 const monitored=sku=>data.stores.some(s=>s.sku===sku), storeName=s=>s.replace(/^Apple /,'');
@@ -44,14 +46,14 @@ function history(){
  const rows=data.periods.filter(p=>(!sid||p.store_id===sid)&&(!cap||data.products[p.sku]?.name.includes(cap))&&(!color||data.products[p.sku]?.name.includes(color))&&(!hours||(p.end||p.last_seen)>=limit));
  historyPage=paginate(rows,historyPage,'history',p=>{
   let end;
-  if(p.end!=null)end=`${esc(fmt(p.end))}<span class="sub"><span class="badge ${p.end_evidence==='query_empty'?'inferred':''}">${p.end_evidence==='query_empty'?'历史推断 · 时间上界':'确认不再符合自提条件'}</span></span>`;
+  if(p.end!=null)end=`${esc(fmtPrecise(p.end))}<span class="sub"><span class="badge ${p.end_evidence==='query_empty'?'inferred':''}">${p.end_evidence==='query_empty'?'历史推断 · 时间上界':'确认不再符合自提条件'}</span></span>`;
   else{
    const current=data.stores.find(s=>s.store_id===p.store_id&&s.sku===p.sku),live=p.is_current&&current?.eligible&&age(current.observed_at)<20;
    end=`<span class="badge ${live?'yes':''}">${live?'最近仍可自提':p.end_reason==='observation_gap'?'观测中断 · 结束未知':'结束未知'}</span>`;
   }
-  const span=p.observed_span_seconds;
-  const elapsed=`<b>${span===0?'0 秒':'约 '+duration(span)}</b><span class="sub">${span===0?'仅单个时间点，实际时长未知':'末次有货 − 首次有货'}</span>`;
-  return `<tr><td><b>${esc(storeName(p.store))}</b><span class="sub">${esc(short(p.sku))}${monitored(p.sku)?'':' · 仅历史'}</span></td><td>${esc(fmt(p.start))}</td><td>${esc(fmt(p.last_seen))}<span class="sub">${p.observations} 次有货观察</span></td><td>${end}</td><td>${elapsed}</td><td>${p.pickup_dates.map(esc).join('<br>')||'—'}</td></tr>`;
+  const lower=p.duration_lower_seconds??p.observed_span_seconds,upper=p.duration_upper_seconds;
+  const elapsed=`<b>${duration(lower)} ～ ${duration(upper)}</b><span class="sub">${upper==null?'上限未知：未确认本段结束':'下限：末次有货；上限：首次确认无货'}</span>`;
+  return `<tr><td><b>${esc(storeName(p.store))}</b><span class="sub">${esc(short(p.sku))}${monitored(p.sku)?'':' · 仅历史'}</span></td><td>${esc(fmtPrecise(p.start))}</td><td>${esc(fmtPrecise(p.last_seen))}</td><td>${end}</td><td>${elapsed}</td><td>${p.pickup_dates.map(esc).join('<br>')||'—'}</td></tr>`;
  });
  $('history-count').textContent=`共 ${rows.length} 段独立记录 · 确认无货即结束，不跨段合并`;
 }

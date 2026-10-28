@@ -56,7 +56,23 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual((periods[0]['start'],periods[0]['last_seen'],periods[0]['end']),(113,120,140))
         # Neither the intervening no-stock gap nor the delayed negative response counts.
         self.assertEqual([p['observed_span_seconds'] for p in periods],[7,10])
+        self.assertEqual([p['duration_lower_seconds'] for p in periods],[7,10])
+        self.assertEqual([p['duration_upper_seconds'] for p in periods],[27,12])
         self.assertTrue(all('historical_first_seen' not in p for p in periods))
+    def test_duplicate_records_same_instant_keep_zero_lower_and_known_upper(self):
+        self.positive('snapshot',100);self.positive('last-seen-copy',100);self.positive('event',100)
+        self.query('end',at=101,finished=103)
+        period=self.c.periods(110)[0]
+        self.assertEqual(period['evidence_records'],3)
+        self.assertNotIn('observations',period)
+        self.assertEqual(period['duration_lower_seconds'],0)
+        self.assertEqual(period['duration_upper_seconds'],3)
+    def test_unknown_end_does_not_use_now_as_upper_duration(self):
+        self.positive('a',100);self.positive('b',101)
+        period=self.c.periods(1000)[0]
+        self.assertEqual(period['duration_lower_seconds'],1)
+        self.assertIsNone(period['duration_upper_seconds'])
+
     def test_single_positive_after_negative_has_zero_observed_span(self):
         self.positive('a',100);self.query('end',at=101,finished=102);self.positive('b',103)
         periods=self.c.periods(110)

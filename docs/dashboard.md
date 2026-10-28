@@ -79,16 +79,25 @@ Stopping/removing this dashboard does not stop inventory monitoring. To remove w
 - Private URL returned HTTP 200; browser loaded current data without console errors. Store/capacity filters and error-only query filter worked. The existing narrow browser viewport displayed responsive cards correctly.
 - Observer PID 75561; source monitor PID 72913 remained unchanged. Observer stderr was empty; all 48 store/configuration rows were present and generated data was fresh.
 
-## Conservative independent availability segments
+## Independent availability segments and duration ranges
 
 Current policy: **a recorded unavailable result always ends that store/SKU's segment. A later positive result starts a new row, even one second later. No wave merging and no global historical-first field are published or displayed.** The prior wave presentation was removed because it counted across confirmed no-stock intervals.
 
-Each row shows the same store/configuration's first positive observation (`start`), last positive observation (`last_seen`), and first subsequent negative confirmation (`end`, if known). Displayed duration is always **`observed_span_seconds = last_seen - start`**, labeled **有货时长（保守）**. Neither the negative confirmation time nor the next segment is included. A single observed time point displays 0 seconds with actual duration unknown; this does not claim the stock physically existed for zero seconds.
+Each row shows the same store/configuration's first positive observation (`start`), last positive observation (`last_seen`), and first subsequent negative confirmation (`end`, if known). Displayed duration is a range labeled **有货时长范围（估计）**: `duration_lower_seconds = last_seen - start`, and `duration_upper_seconds = end - start` when a first negative confirmation exists. No next segment is included. Unknown ends have an unknown upper bound; the current clock is never substituted. A single observed time point can have a zero lower bound and a nonzero upper bound. These are observation-relative bounds from first discovery, not the physical lifetime before detection.
 
-The backend exports only independent `periods` plus `history_rules` with `merge_across_unavailable=false` and `duration_basis=last_positive_minus_first_positive`. There is no merged `waves` output, historical first field, or first-to-negative duration. Filters do not regroup or extend intervals.
+The backend exports only independent `periods` plus `history_rules` with `merge_across_unavailable=false` and `duration_basis=last_positive_to_first_negative_range`. There is no merged `waves` output or historical first field. The first negative confirmation contributes only the upper duration bound. Filters do not regroup or extend intervals.
 
 Valid per-store/SKU snapshot negatives or later successful zero-offer queries with matching SKU/store coverage end a segment. HTTP failures and missing coverage remain unknown, never out-of-stock. Historical snapshots were overwritten, so retained evidence cannot prove every unrecorded transition. More than 120 seconds without any positive observation and no valid negative also splits a segment as `observation_gap`, with unknown end. A current positive snapshot cannot extend an older segment across such a gap.
 
 Indexed in-memory evidence lookup avoids a repeated database scan per positive observation. Tests cover immediate restock after a negative, exact per-segment duration, excluding delayed negative confirmation, zero-span single observations, unknown long gaps, matching coverage and errors, current snapshot isolation, different-store separation and indexed/direct evidence equivalence.
 
-Example (Eastern, 2026-10-27): Fifth Avenue / white 256GB's records around 17:00 are separate rows: approximately **17:00:13 → 17:00:15 (~3 seconds)** and **17:01:07 → 17:01:24 (~17 seconds)**. The negative observation in between ends the first segment. The former merged 71-second display has been removed. Durations use subsecond timestamps and are rounded for display, so whole-second labels may differ slightly from their subtraction.
+Example (Eastern, 2026-10-27): Fifth Avenue / white 256GB's records around 17:00 are separate rows: approximately **17:00:13 → 17:00:15 (~3 seconds)** and **17:01:07 → 17:01:24 (~17 seconds)**. The negative observation in between ends the first segment. The former merged 71-second display has been removed. With their respective first negative confirmations, the duration ranges are approximately **2.580–4.477 seconds** and **16.868–30.954 seconds**; exact values depend on retained subsecond observation timestamps. Durations use subsecond timestamps and are rounded for display, so whole-second labels may differ slightly from their subtraction.
+
+
+### Evidence record count is not an independent query count
+
+One query response can yield a positive event-log record, a positive snapshot record, and a saved last-positive snapshot when the state changes. The old `observations` count incorrectly suggested these were distinct query observations. It has been removed from the UI and renamed `evidence_records` in exported data. Because older records lack a shared request ID, the dashboard does not invent an exact independent-query count or deduplicate requests using an arbitrary time threshold.
+
+History timestamps now show milliseconds; for example the retained Queens Center / black 512GB record at 16:05:23.541–16:05:23.542 contains three records but only about 1ms of observed timestamp difference. At second-level resolution both endpoints looked identical. The estimated duration range for that record is 0.001–1.258 seconds, not “three successful checks over zero seconds.”
+
+Fourteen focused tests now cover duplicate same-instant evidence, a zero lower bound with a known upper bound, unknown ends, excluding later segments, and all previous coverage/error/segmentation guarantees.
