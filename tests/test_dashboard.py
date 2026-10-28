@@ -1,5 +1,7 @@
 """Availability evidence must never confuse a failed query with sold-out stock."""
 import importlib.util
+import datetime as dt
+import os
 import json
 from pathlib import Path
 import tempfile
@@ -13,7 +15,7 @@ class DashboardTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.sku='MK1E4LL/A';self.sid='R755'
-        (self.root/'config.json').write_text(json.dumps({'products':{self.sku:{'name':'White 256GB'}},'max_pickup_days':3}))
+        (self.root/'config.json').write_text(json.dumps({'products':{self.sku:{'name':'White 256GB','url':'https://www.apple.com/shop/buy-iphone/iphone-duo/test'}},'max_pickup_days':3}))
         self.c=m.Collector(self.root)
     def tearDown(self):
         self.c.db.close();self.temp.cleanup()
@@ -22,8 +24,14 @@ class DashboardTests(unittest.TestCase):
     def positive(self,identifier,t):
         self.c.db.execute('INSERT INTO positives VALUES (?,?,?,?,?,?,?,?)',(identifier,t,self.sid,self.sku,'2026-10-27','Apple American Dream','NJ','Today'))
     def test_failure_never_closes_stock(self):
-        self.positive('p',100);self.query('error','http_541');self.query('network','network_error')
+        self.positive('p',100)
+        errors=['http_541','http_403','http_429','http_500','network_error','non_json_response',
+                'invalid_response','missing_sku_in_regional_response','regional_store_coverage_missing']
+        for error in errors:
+            self.query(error,error)  # Even offers=0 on an error cannot prove absence.
         self.assertIsNone(self.c.periods(110)[0]['end'])
+        self.assertIsNone(self.c.absence(self.sid,self.sku,100,110))
+        self.assertIsNone(self.c.absence(self.sid,self.sku,100,110,self.c.absence_index()))
     def test_empty_success_requires_matching_coverage_and_later_start(self):
         self.query('wrong-sku',skus=['OTHER']);self.query('wrong-store',covered=['OTHER']);self.query('older-inflight',at=99,finished=104)
         self.assertIsNone(self.c.absence(self.sid,self.sku,100,110))
@@ -109,6 +117,38 @@ class DashboardTests(unittest.TestCase):
         (directory.parent/'current.json').write_text(json.dumps({'output':str(directory),'zip':'07094','monitored_skus':[self.sku]}))
         (directory/'last-inventory.json').write_text('{"body":{"stores":[{"storeNumber":"R755"}]}}')
         self.c.snapshot();self.assertEqual(self.c.db.execute('SELECT count(*) FROM negatives').fetchone()[0],0)
+    def test_invalid_snapshot_preserves_last_positive_until_explicit_negative(self):
+        directory=self.root/'runtime/proxy-monitor/20261027-000000';directory.mkdir(parents=True)
+        (directory.parent/'current.json').write_text(json.dumps({'output':str(directory),'zip':'07094','monitored_skus':[self.sku]}))
+        today=dt.datetime.now(m.TZ).date()
+        good={'body':{'location':'07094','stores':[{'storeNumber':self.sid,'storeName':'American Dream',
+            'state':'NJ','city':'East Rutherford','partsAvailability':{self.sku:{'pickupDisplay':'available',
+            'pickupSearchQuote':'Available Today','pickupEncodedUpperDateString':today.strftime('%Y%m%d'),
+            'messageTypes':{'regular':{'storeSelectionEnabled':True,'storePickupQuote':'Today at Apple American Dream'}}}}}]}}
+        path=directory/'last-inventory.json';timestamp=dt.datetime.combine(today,dt.time(12),tzinfo=m.TZ).timestamp()
+        def write(raw):
+            nonlocal timestamp
+            timestamp+=2;path.write_text(json.dumps(raw));os.utime(path,(timestamp,timestamp))
+        write(good);self.c.snapshot()
+        self.assertEqual(self.c.db.execute('SELECT eligible FROM current').fetchone()[0],1)
+        for invalid in ['missing_sku','missing_flag','unknown_display','wrong_zip','empty_stores','error_body']:
+            with self.subTest(invalid=invalid):
+                raw=json.loads(json.dumps(good));store=raw['body']['stores'][0];part=store['partsAvailability'][self.sku]
+                if invalid=='missing_sku':store['partsAvailability']={}
+                elif invalid=='missing_flag':del part['messageTypes']['regular']['storeSelectionEnabled']
+                elif invalid=='unknown_display':part['pickupDisplay']='error'
+                elif invalid=='wrong_zip':raw['body']['location']='99999'
+                elif invalid=='empty_stores':raw['body']['stores']=[]
+                else:raw={'error':'temporary failure'}
+                write(raw);self.c.snapshot()
+                self.assertEqual(self.c.db.execute('SELECT count(*) FROM negatives').fetchone()[0],0)
+                self.assertEqual(self.c.db.execute('SELECT eligible FROM current').fetchone()[0],1)
+        unavailable=json.loads(json.dumps(good));part=unavailable['body']['stores'][0]['partsAvailability'][self.sku]
+        part['pickupDisplay']='unavailable';part['messageTypes']['regular']['storeSelectionEnabled']=False
+        write(unavailable);self.c.snapshot()
+        self.assertEqual(self.c.db.execute('SELECT count(*) FROM negatives').fetchone()[0],1)
+        self.assertEqual(self.c.db.execute('SELECT eligible FROM current').fetchone()[0],0)
+
     def test_export_whitelists_monitor_fields_and_sanitizes_text(self):
         self.c.monitor={'status':'running','secret':'never-export-this','proxy_url':'private'}
         result=self.c.export();self.assertNotIn('secret',result['monitor']);self.assertNotIn('proxy_url',result['monitor'])

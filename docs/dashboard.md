@@ -101,3 +101,15 @@ One query response can yield a positive event-log record, a positive snapshot re
 History timestamps now show milliseconds; for example the retained Queens Center / black 512GB record at 16:05:23.541–16:05:23.542 contains three records but only about 1ms of observed timestamp difference. At second-level resolution both endpoints looked identical. The estimated duration range for that record is 0.001–1.258 seconds, not “three successful checks over zero seconds.”
 
 Fourteen focused tests now cover duplicate same-instant evidence, a zero lower bound with a known upper bound, unknown ends, excluding later segments, and all previous coverage/error/segmentation guarantees.
+
+### Error-versus-unavailable audit, 2026-10-27
+
+An HTTP/network/schema error never proves absence. Historical query inference requires the post-validation result `http_200`, `offers=0`, the matching SKU and known store coverage, and a request that started after the last positive observation. A successful HTTP response alone is insufficient: empty/malformed responses or missing fields fail parsing rather than becoming a negative.
+
+Snapshot evidence comes from `last-inventory.json`, which both production backends replace only after inventory parsing succeeds. The dashboard validates its location, store records, requested SKUs, availability flags and pickup-date schema again. Snapshot errors roll back without clearing the last positive state. Missing stores are not visited or turned into negative records. A stale snapshot remains stale, not a new negative. A long observation gap is labeled unknown rather than confirmed unavailable.
+
+All 140 retained `query_empty` segment endings were checked against their exact recorded completion timestamp, validated-success result, zero offers, matching SKU/store coverage and request start after the last positive; zero mismatches were found. The other 101 endings use snapshot evidence; old full snapshots were overwritten and cannot all be independently replayed. Their producer/consumer validation paths were reviewed and covered by tests instead of claiming the original bodies remain available.
+
+Fifteen tests passed, including a currently positive snapshot followed by missing SKU, missing boolean flag, unknown display status, wrong ZIP, empty store list and an error body: none writes a negative or clears the positive state. A subsequent explicit unavailable response does. The error-query test also covers HTTP 541/403/429/500, network errors, non-JSON, invalid response and missing coverage, even if a failed row happens to contain `offers=0`.
+
+“Unavailable” here means not qualifying for the configured near-term pickup window (today through the next three days). A store with a later pickup date can cease to qualify without being physically sold out; error handling and this eligibility rule are separate concepts.
