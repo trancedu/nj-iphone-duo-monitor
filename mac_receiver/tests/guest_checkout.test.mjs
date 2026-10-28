@@ -63,7 +63,7 @@ test('missing native prompt gets a bounded appearance grace; unknown sheets are 
  const result=await cancelGuestSignIn({},()=>{},{now:()=>clock,pause:async ms=>{clock+=ms;},probe:async()=> 'absent'});
  assert.equal(result.status,'not_present');assert.equal(clock,2000);
  let clicks=0;clock=0;await assert.rejects(()=>cancelGuestSignIn({},()=>{},{now:()=>clock,pause:async ms=>{clock+=ms;},probe:async cancel=>{if(cancel)clicks++;return 'unknown_sheet';}}),/unknown_guest_sheet/);assert.equal(clicks,0);
- assert.throws(()=>guestAccountPromptScript('Duo512Black',{cancel:true}),/isolated_guest_profile/);
+ assert.throws(()=>guestAccountPromptScript('UnrelatedWindow',{cancel:true}),/isolated_guest_profile/);
 });
 test('native cancellation failure stops the flow instead of falling through to Guest',async()=>{
  const {cancelGuestSignIn}=await import('../safari/guest_checkout.mjs');

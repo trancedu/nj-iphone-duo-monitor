@@ -25,3 +25,11 @@ test('delivery review can only invoke the exact change-shipping button once',()=
  vm.runInNewContext(`(${prewarmDOM.toString()})({op:'changeShipping'})`,context);assert.equal(clicks,1);
  assert.throws(()=>vm.runInNewContext(`(${prewarmDOM.toString()})({op:'changeShipping'})`,context),/already_requested/);assert.equal(clicks,1);
 });
+
+test('shared production preparation accepts only exact profile and configured product pairs',async()=>{
+ const {validateSetupProfile}=await import('../safari/guest_setup.mjs');
+ const url='https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-1tb-star-white-unlocked';
+ assert.equal(validateSetupProfile({profile:'Duo1024White'},url),'iPhone Duo 1TB Star White');
+ assert.throws(()=>validateSetupProfile({profile:'Duo1024Black'},url),/profile_product_mismatch/);
+ assert.throws(()=>validateSetupProfile({profile:'Main'},url),/profile_not_allowed/);
+});

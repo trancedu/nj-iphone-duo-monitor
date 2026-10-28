@@ -1,7 +1,7 @@
 import {mkdirSync, readFileSync, writeFileSync, renameSync, existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {fingerprint, Stop} from './protocol.mjs';
-import {sanitizeObservation,appendDiagnostic} from './safari/diagnostics.mjs';
+import {sanitizeObservation,appendDiagnostic,safeErrorCode} from './safari/diagnostics.mjs';
 const now = () => new Date().toISOString();
 
 export class Engine {
@@ -15,6 +15,7 @@ export class Engine {
       if(['held','global_waiting'].includes(item.status)) {item.status='expired';item.reason='receiver_restarted';item.timestamps.finished_at=now();}
       if (['queued','running'].includes(item.status)) {
         item.status='interrupted'; item.reason='receiver_restarted'; item.timestamps.finished_at=now();
+        if(item.timestamps.guest_order_requested_at)item.status='awaiting_user';
         this.state.active=item.event_id;
       }
     }
@@ -35,11 +36,17 @@ export class Engine {
   health() {
     this.expireHeld();
     return {status:'ok',mode:this.config.dry_run?'dry_run':'live',
-      browser_ready:this.browser.ready(),active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
+      browser_ready:this.browser.ready(),automation_blocked:this.browser.automationBlocked===true,active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
       ...(this.config.idle_bag_refresh_interval_seconds?{idle_bag_refresh_interval_seconds:this.config.idle_bag_refresh_interval_seconds}:{}),
       ...(this.config.standby_page?{standby_page:this.config.standby_page,idle_checkout_refresh_interval_seconds:this.config.idle_checkout_refresh_interval_seconds,checkout_session_check_interval_seconds:this.config.checkout_session_check_interval_seconds||60,pickup_zip:this.config.pickup_zip}:{}),
       ...(this.browser.lastSessionCheck?{checkout_session_watch:this.browser.lastSessionCheck}:{}),
       ready:this.config.dry_run||this.browser.ready(),...(this.config.standby_page?{standby_page_verified:!this.state.active&&this.browser.lastStandbyReady===true}:{}),pending_events:Object.values(this.state.events).filter(x=>x.status==='held').length,apple_pay_verified:'manual_verification_required'};
+  }
+  pruneHistory(max=2048){
+    const records=Object.values(this.state.events);if(records.length<=max)return;
+    const removable=records.filter(e=>e.event_id!==this.state.active&&!['queued','running','held','global_waiting','order_result_unknown'].includes(e.status)&&!e.rearm_pending&&Date.now()-Date.parse(e.timestamps?.received_at)>600000).sort((a,b)=>a.timestamps.received_at.localeCompare(b.timestamps.received_at));
+    let removed=0,remaining=records.length;for(const e of removable){if(remaining<=max)break;delete this.state.events[e.event_id];remaining--;removed++;}
+    if(removed){appendDiagnostic(join(this.config.state_dir,'events.jsonl'),{at:now(),stage:'terminal_history_compacted',removed});this.save();}
   }
   accept(event) {
     this.expireHeld();
@@ -48,6 +55,7 @@ export class Engine {
       if (prior.fingerprint!==fingerprint(event)) {this.log(prior,'duplicate_event_conflict');return {code:409,body:{event_id:event.event_id,status:'event_id_conflict'}};}
       this.log(prior,'duplicate_event_ignored');return {code:200,body:this.public(prior)};
     }
+    if(Object.keys(this.state.events).length>=4096)this.pruneHistory();
     if(Object.keys(this.state.events).length>=4096) return {code:429,body:{event_id:event.event_id,status:'event_capacity_reached'}};
     let status='queued';
     if (this.state.active) status=this.config.queue_while_busy?Object.values(this.state.events).filter(x=>x.status==='held').length<(this.config.max_pending_events||8)?'held':'queue_full':'busy';
@@ -63,6 +71,8 @@ export class Engine {
     return {event_id:item.event_id,status:item.status,reason:item.reason,timestamps:item.timestamps,...(item.feedback?{feedback:item.feedback}:{}),...(item.signal_feedback?{signal_feedback:item.signal_feedback}:{}),...(item.last_observation?{last_observation:item.last_observation,diagnostic_count:item.diagnostic_count}:{}),...(item.payment_watch?{payment_watch:item.payment_watch}:{}),...(item.idle_watch_state?{idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at}:{}),...(item.release_reason?{release_reason:item.release_reason,reset_at:item.reset_at}:{})};
   }
   stage(item,name,detail) {
+    if(name==='guest_order_requested_at'&&this.beforeGuestSubmission)this.beforeGuestSubmission(item);
+    if(name==='guest_order_click_returned_at')this.onGuestOutcome?.(item,'submitted');
     item.timestamps[name]=now();
     if(detail){const observation=sanitizeObservation(detail);appendDiagnostic(join(this.config.state_dir,'diagnostics.jsonl'),{at:item.timestamps[name],event_id:item.event_id,stage:name,...observation});item.last_observation=observation;item.diagnostic_count=(item.diagnostic_count||0)+1;}
     this.save(); this.log(item,name);
@@ -86,14 +96,16 @@ export class Engine {
       if(item.status==='pickup_expired')item.reason='pickup_expired_after_timeout';
     } catch (error) {
       item.status=error instanceof Stop&&error.code==='pickup_task_deadline'?'lock_timeout':error instanceof Stop&&error.code==='pickup_stalled_yield'?'superseded':error instanceof Stop&&error.code==='pickup_unavailable'?'pickup_unavailable':'manual_review';
-      item.reason=error instanceof Stop?error.code:error?.name==='TimeoutError'?'timeout':'browser_error';
+      item.reason=error instanceof Stop?error.code:error?.name==='TimeoutError'?'timeout':/^[a-z][a-z0-9_]{1,79}$/.test(error?.message||'')?error.message:'browser_error';
       this.stage(item,'execution_error_at',{kind:'execution_error',error_code:error instanceof Stop?error.code:/^[a-z][a-z0-9_]{1,79}$/.test(error?.message||'')?error.message:item.reason});
     }
+    if(this.config.checkout_method==='guest_credit'&&item.timestamps.guest_order_requested_at&&item.status!=='awaiting_user'){item.status='awaiting_user';item.reason='guest_submission_result_pending';}
     // Once stock was found or checkout progressed, never navigate back even if
     // a later error is mislabeled as unavailable. Preserve the user's page.
     const progressed=['pickup_stock_found_at','store_selected_at','time_selected_at','pickup_time_at','details_navigation_at','details_page_ready_at','contact_verified_at','pickup_details_at','handoff_at'].some(key=>Object.hasOwn(item.timestamps,key));
     if(item.status==='pickup_unavailable'&&progressed){item.status='manual_review';item.reason='pickup_unavailable_after_selection_preserved';}
     this.stage(item,'finished_at');
+    if(item.reason&&item.status!=='pickup_unavailable')void this.browser.captureFailureEvidence?.(item)?.catch(()=>{});
     if(item.timestamps.apple_pay_sheet_requested_at&&Date.now()-Date.parse(item.timestamps.apple_pay_sheet_requested_at)>=10000&&this.browser.expirePaymentWindow){
       await this.watchPaymentDeadline();
       if(this.state.active!==item.event_id)return;
@@ -103,6 +115,16 @@ export class Engine {
       this.reset(item.event_id,true);
       if(item.status==='superseded')this.onStalledReleased?.(item.event_id);else this.onProfileReleased?.(item.event_id);
       return; // The old workflow has unwound; never run its remaining steps or restore its page.
+    }
+    if(this.config.checkout_method==='guest_credit'&&item.status==='manual_review'&&!item.timestamps.guest_order_requested_at&&this.browser.restoreBeforeGuestSubmit){
+      this.releasing=true;
+      try{
+        item.status='pre_submit_failed';item.release_reason=item.reason;this.reset(item.event_id,true);
+        if(item.reason!=='daily_order_limit_reached')await this.browser.restoreBeforeGuestSubmit(item);
+        this.stage(item,'pre_submit_pickup_restored_at');
+      }catch(error){item.status='automation_paused';item.reason=safeErrorCode(error,'pre_submit_restore_failed');this.browser.automationBlocked=true;this.stage(item,'pre_submit_restore_failed_at',{kind:'guest_recovery',error_code:item.reason});}
+      finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
+      return;
     }
     this.signaling=true;
     try { const feedback=await this.browser.handoff(item.status,item.reason);if(feedback){item.feedback=feedback;this.stage(item,feedback.audio_queued!==undefined?'feedback_dispatched_at':'feedback_completed_at');} }
@@ -147,12 +169,35 @@ export class Engine {
       this.releasing=false;this.onProfileReleased?.(item.event_id);
     }
   }
+  async watchGuestOrder(item,state,nowMs){
+    if(state.outcome==='success'&&state.observed===true){
+      this.onGuestOutcome?.(item,'success');
+      this.releasing=true;
+      try{
+        item.status='order_confirmed';item.reason=null;item.release_reason='confirmed_order_success';item.rearm_pending=this.config.guest_auto_rearm===true;
+        this.stage(item,'guest_order_confirmed_at');this.reset(item.event_id,true);
+        if(item.rearm_pending){
+          this.stage(item,'post_order_setup_started_at');
+          await this.browser.rearmAfterGuestSuccess(item,(n,d)=>this.stage(item,n,d));
+          item.rearm_pending=false;this.stage(item,'post_order_pickup_ready_at');
+        }
+        return true;
+      }catch(error){item.status='order_confirmed_rearm_failed';item.reason=safeErrorCode(error,'post_order_setup_failed');this.browser.automationBlocked=true;this.stage(item,'post_order_setup_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
+      finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
+    }
+    if(state.outcome==='failed'&&state.recoverable===true){this.onGuestOutcome?.(item,'failed');return null;}
+    if(nowMs-Date.parse(item.timestamps.guest_order_requested_at)>=(this.config.guest_order_result_timeout_seconds||20)*1000&&item.status!=='order_result_unknown'){
+      this.onGuestOutcome?.(item,'unknown');item.status='order_result_unknown';item.reason='order_result_not_confirmed_after_deadline';
+      this.stage(item,'guest_order_result_unknown_at');void this.browser.captureFailureEvidence?.(item)?.catch(()=>{});
+    }
+    return false;
+  }
   async watchPaymentFailure(nowMs=Date.now()){
     const item=this.state.events[this.state.active];
-    if(!item||!['awaiting_user','manual_review'].includes(item.status)||(!item.timestamps.apple_pay_sheet_requested_at&&!item.timestamps.payment_observer_armed_at&&!item.timestamps.guest_order_requested_at)||this.releasing||this.signaling||!this.browser.inspectPaymentFailure)return false;
+    if(!item||!['awaiting_user','manual_review','order_result_unknown'].includes(item.status)||(!item.timestamps.apple_pay_sheet_requested_at&&!item.timestamps.payment_observer_armed_at&&!item.timestamps.guest_order_requested_at)||this.releasing||this.signaling||!this.browser.inspectPaymentFailure)return false;
     if(nowMs<(this.nextPaymentPoll||0))return false;
     this.nextPaymentPoll=nowMs+1000;
-    let state;try{state=await this.browser.inspectPaymentFailure(item);}catch{return false;}
+    let state;try{state=await this.browser.inspectPaymentFailure(item);}catch{state={outcome:'unknown',observed:false,phase:'observation_failed'};}
     if(this.state.active!==item.event_id)return false;
     if(!item.timestamps.guest_order_requested_at&&!item.timestamps.apple_pay_sheet_requested_at&&state.observed===true&&Number.isFinite(Date.parse(state.requested_at))){
       item.timestamps.apple_pay_sheet_requested_at=state.requested_at;
@@ -161,6 +206,7 @@ export class Engine {
     }
     const observation={phase:state.phase||'unknown',outcome:state.outcome||'unknown',closed:state.closed===true,observed:state.observed===true};
     if(JSON.stringify(item.payment_watch)!==JSON.stringify(observation)){item.payment_watch=observation;this.save();this.log(item,'payment_result_observed');}
+    if(item.timestamps.guest_order_requested_at&&this.config.checkout_method==='guest_credit'){const handled=await this.watchGuestOrder(item,state,nowMs);if(handled!==null)return handled;}
     if(!state.recoverable||state.outcome!=='failed'||this.state.active!==item.event_id||this.releasing||this.signaling)return false;
     this.releasing=true;let released=false;
     try{

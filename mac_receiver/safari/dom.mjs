@@ -43,8 +43,8 @@ export function safariDOM({op,args={}}) {
     if(candidates.length!==1)fail('session_continue_missing_or_ambiguous');
     click(candidates[0]);return {clicked:true};
   }
-  const canAbandonPickup=()=>u.searchParams.get('_s')==='Fulfillment-init'&&norm(document.body?.textContent).includes(args.product)&&!window.__duoApplePayRequested&&!document.getElementById('co-options-applePay')&&!all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent)));
-  const canRetireLoading=()=>u.searchParams.get('_s')==='Fulfillment-init'&&!window.__duoApplePayRequested&&!window.__duoPickupStoreSelected&&!document.getElementById('co-options-applePay')&&!all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent)));
+  const canAbandonPickup=()=>['Fulfillment','Fulfillment-init'].includes(u.searchParams.get('_s'))&&norm(document.body?.textContent).includes(args.product)&&!window.__duoApplePayRequested&&!document.getElementById('co-options-applePay')&&!all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent)));
+  const canRetireLoading=()=>['Fulfillment','Fulfillment-init'].includes(u.searchParams.get('_s'))&&!window.__duoApplePayRequested&&!window.__duoPickupStoreSelected&&!document.getElementById('co-options-applePay')&&!all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent)));
   if(op==='abandonLoadingPickup'){
     // Called only by the bound profile's pre-store workflow, after its refresh.
     if(!canRetireLoading())return {abandoned:false};
@@ -65,7 +65,7 @@ export function safariDOM({op,args={}}) {
     const state=safariDOM({op:'standbyState',args});
     const unavailable=stores().length>0&&stores().every(e=>!enabled(e)&&/Currently unavailable|Unavailable for pickup|Not available/i.test(name(e)));
     const heading=all('h1,h2').some(e=>visible(e)&&/How would you like to get your order\?/i.test(norm(e.textContent)));
-    if(!window.__duoApplePayRequested||u.searchParams.get('_s')!=='Fulfillment-init'||!state.matching_product||!state.pickup_ready||!state.pickup_selected||!heading||!unavailable||state.expired||state.session_warning||state.protection.final_button_present||state.protection.contact_heading)return {reconciled:false};
+    if(!window.__duoApplePayRequested||!['Fulfillment','Fulfillment-init'].includes(u.searchParams.get('_s'))||!state.matching_product||!state.pickup_ready||!state.pickup_selected||!heading||!unavailable||state.expired||state.session_warning||state.protection.final_button_present||state.protection.contact_heading)return {reconciled:false};
     window.__duoApplePayRequested=false;
     window.__duoPickupStoreSelected=false;
     window.__duoPickupContinueRequested=false;
@@ -75,7 +75,7 @@ export function safariDOM({op,args={}}) {
   if(op==='rearmExpiredPickupStandby'){
     // Called only after a stopped/finished request; validate live inventory atomically.
     const d=safariDOM({op:'diagnosticState',args}),state=safariDOM({op:'standbyState',args});
-    if(d.pickup_expiry_confirmed!==true||d.page.state!=='Fulfillment-init'||d.displayed_zip!==args.zip||!state.pickup_selected||state.expired||state.session_warning)return {rearmed:false};
+    if(d.pickup_expiry_confirmed!==true||!['Fulfillment','Fulfillment-init'].includes(d.page.state)||d.displayed_zip!==args.zip||!state.pickup_selected||state.expired||state.session_warning)return {rearmed:false};
     window.__duoPickupStoreSelected=false;
     window.__duoPickupContinueRequested=false;
     return {rearmed:true,...safariDOM({op:'armPickupStandby',args})};
@@ -142,7 +142,9 @@ export function safariDOM({op,args={}}) {
     const zipButton=buttons().map(name).find(s=>/^\d{5}(?:\s|$)/.test(s));
     const rawZip=zip?.value||zipButton?.match(/^\d{5}/)?.[0]||null;
     const pickup_expiry_confirmed=typeof args.product==='string'&&norm(document.body?.textContent).includes(args.product)&&all('h1,h2').some(e=>visible(e)&&/How would you like to get your order\?/i.test(norm(e.textContent)))&&!!storeList()&&visible(storeList())&&stores().length>0&&stores().every(e=>!enabled(e)&&/Currently unavailable|Unavailable for pickup|Not available/i.test(name(e)))&&!window.__duoApplePayRequested&&!document.getElementById('co-options-applePay')&&!all('img,[aria-busy="true"],[role="progressbar"]').some(e=>visible(e)&&(e.tagName!=='IMG'||name(e)==='Processing'));
-    return {pickup_expiry_confirmed,page:{origin:u.origin,path:u.pathname,state:u.searchParams.get('_s')},displayed_zip:/^\d{5}$/.test(rawZip||'')?rawZip:null,no_availability:noAvailability(),
+    const available_date_count=all('input[type=radio]').filter(e=>/bartPickupDate/i.test(e.name||e.id)&&enabled(e)).length;
+    const available_time_count=slot()?Array.from(slot().options).filter(o=>!o.disabled&&/^\d{1,2}:\d{2}/.test(o.label)).length:0;
+    return {available_date_count,available_time_count,store_selected:stores().some(checked),time_selected:!!slot()?.value,pickup_expiry_confirmed,page:{origin:u.origin,path:u.pathname,state:u.searchParams.get('_s')},displayed_zip:/^\d{5}$/.test(rawZip||'')?rawZip:null,no_availability:noAvailability(),
       stores:stores().map(e=>{const label=name(e);return {name:label,enabled:enabled(e),visible:visible(Array.from(e.labels||[]).find(visible)||e),store_id:((e.id+' '+e.value).match(/\bR\d{3,4}\b/)||[])[0]||null,availability_text:(label.match(/Currently unavailable|Unavailable for pickup|Not available|unavailable|Available Today|Available Tomorrow|Available for pickup/i)||[])[0]||null};})};
   }
   if(op==='moreStores') {if(noAvailability())return {expanded:false,noAvailability:true};const root=storeList();const b=root?all('button,[role="button"],a',root).filter(e=>visible(e)&&/^Show more stores\b/.test(name(e))):[];if(b.length!==1)return {expanded:false};click(b[0]);return {expanded:true};}

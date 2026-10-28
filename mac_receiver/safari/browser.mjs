@@ -1,13 +1,15 @@
 // Production adapter. Engine owns deduplication, held queues and durable locks.
 import {SafariWindow,listSafariWindows,prepareSafari,prepareSafariStandby,waitFor} from './shopping.mjs';
 import {runGuestSignal,prepareGuestStandby,runGuestDOM} from './guest_checkout.mjs';
+import {captureFailureEvidence} from './failure_evidence.mjs';
+import {prepareGuestPaymentSession} from './guest_setup.mjs';
 import {signalSafari} from './feedback.mjs';
-import {appendDiagnostic} from './diagnostics.mjs';
+import {appendDiagnostic,safeErrorCode} from './diagnostics.mjs';
 import {join} from 'node:path';
 import {Stop,expectedProduct} from '../protocol.mjs';
 export class SafariPickupBrowser {
   constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,standby=prepareSafariStandby,signal=signalSafari}={}) {
-    this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=config.checkout_method==='guest_credit'?async(w,u,c,opts)=>{const r=await runGuestSignal(w,u,c,c.guest_billing,opts.stage,{mode:c.guest_auto_place_order&&!c.simulation_no_payment?'production':'test',max_total_usd:c.guest_max_total_usd||0,shouldYieldToRecent:opts.shouldYieldToRecent,mayForeground:opts.mayForeground});return {...r,status:r.status==='review_ready_test_stopped'||r.status==='order_requested'?'awaiting_user':r.status};}:prepare;this.standby=config.checkout_method==='guest_credit'?prepareGuestStandby:standby;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
+    this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=config.checkout_method==='guest_credit'?async(w,u,c,opts)=>{const r=await runGuestSignal(w,u,c,c.guest_billing,opts.stage,{mode:c.guest_auto_place_order&&!c.simulation_no_payment?'production':'test',max_total_usd:c.guest_max_total_usd||0,shouldYieldToRecent:opts.shouldYieldToRecent,mayForeground:opts.mayForeground});return {...r,status:r.status==='review_ready_test_stopped'||r.status==='order_requested'||r.status==='order_request_uncertain'?'awaiting_user':r.status};}:prepare;this.standby=config.checkout_method==='guest_credit'?prepareGuestStandby:standby;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
   }
   ready(){return this.connected&&!!this.page&&!this.page.closed;}
   async start(){await this.ensurePage();}
@@ -60,8 +62,8 @@ export class SafariPickupBrowser {
       if(error instanceof Stop&&['pickup_stalled_yield','pickup_task_deadline'].includes(error.code)){this.stalledProfilePending=true;this.lastStandbyCheckAt=0;this.lastStandbyReady=false;throw error;}
       if(!(error instanceof Stop&&error.code==='pickup_unavailable')){
         let diagnostic={};try{diagnostic=await this.window.call('diagnosticState',{product:expectedProduct(event.product_url)});}catch{}
-        observe('pickup_failure_observed_at',{...diagnostic,kind:'pickup_failure',error_code:error instanceof Stop?error.code:'browser_error'});
-        if(error instanceof Stop&&error.code==='safari_step_timeout'&&diagnostic.pickup_expiry_confirmed===true&&diagnostic.page?.state==='Fulfillment-init'&&diagnostic.displayed_zip===cfg.pickup_zip){
+        observe('pickup_failure_observed_at',{...diagnostic,kind:'pickup_failure',error_code:safeErrorCode(error)});
+        if(error instanceof Stop&&error.code==='safari_step_timeout'&&diagnostic.pickup_expiry_confirmed===true&&['Fulfillment','Fulfillment-init'].includes(diagnostic.page?.state)&&diagnostic.displayed_zip===cfg.pickup_zip){
           observe('pickup_expired_confirmed_at',{...diagnostic,kind:'pickup_failure',error_code:'pickup_expired_after_timeout'});
           this.lastResult={status:'pickup_expired'};return 'pickup_expired';
         }
@@ -90,8 +92,25 @@ export class SafariPickupBrowser {
     return {status:'standby_checkout'};
   }
   async inspectPaymentFailure(item){
-    if(this.config.checkout_method==='guest_credit')return runGuestDOM(this.window,'guestOrderState',{event_id:item.event_id,expected_product:expectedProduct(item.product_url)});
+    if(this.config.checkout_method==='guest_credit')return runGuestDOM(this.window,'guestOrderState',{event_id:item.event_id,expected_product:expectedProduct(item.product_url),submission_expected:!!item.timestamps.guest_order_requested_at});
     return this.window.call('paymentFailureState',{event_id:item.event_id,product:expectedProduct(item.product_url)});
+  }
+  captureFailureEvidence(item){return captureFailureEvidence(this,item);}
+  async rearmAfterGuestSuccess(item,stage=()=>{}){
+    if(!this.config.guest_auto_rearm)throw new Stop('guest_auto_rearm_disabled');
+    this.lastStandbyReady=false;
+    await runGuestDOM(this.window,'retireGuestOrderSuccess',{event_id:item.event_id,expected_product:expectedProduct(item.product_url),submission_expected:true});
+    const result=await prepareGuestPaymentSession(this.window,item.product_url,this.config,{allowReplenish:true,stage});
+    this.lastStandbyReady=true;this.lastStandbyCheckAt=Date.now();this.lastIdleRefreshAt=Date.now();return result;
+  }
+  async restoreBeforeGuestSubmit(item){
+    this.lastStandbyReady=false;
+    if(this.config.guest_auto_rearm&&item.reason==='prepared_payment_missing_manual_review'){const r=await prepareGuestPaymentSession(this.window,item.product_url,this.config);this.lastStandbyReady=r.status==='standby_checkout';return r;}
+    const r=await runGuestDOM(this.window,'restoreGuestBeforeSubmit',{expected_product:expectedProduct(item.product_url)});
+    if(!r.restored&&!r.response_unknown)throw new Stop('pre_submit_restore_not_verified');
+    await waitFor(async()=>{const s=await runGuestDOM(this.window,'state');return ['Fulfillment','Fulfillment-init'].includes(s.step);},this.config.step_timeout_ms||20000);
+    const result=await this.standby(this.window,item.product_url,this.config,{activeRequest:true});
+    this.lastStandbyReady=result.status==='standby_checkout';return result;
   }
   async expirePaymentWindow(item){
     this.lastStandbyReady=false;
@@ -145,11 +164,15 @@ export class SafariPickupBrowser {
       if(detail?.kind==='pickup_location')console.info(JSON.stringify({event:'standby_location_check',profile:this.config.safari_profile,stage,...detail,at:new Date().toISOString()}));
     }};
   }
-  async seedIdle(){
+  async seedIdle({allowRebuild=true}={}){
     await this.ensurePage();
     let result;
     if(this.config.checkout_method==='guest_credit'){
-      result=await this.standby(this.window,this.config.preseeded_product_url,this.config,this.standbyTrace());
+      const current=await runGuestDOM(this.window,'state');
+      if(this.config.guest_auto_rearm&&current.path!=='/shop/checkout'){
+        if(!allowRebuild)return {status:'needs_session_setup'};
+        result=await prepareGuestPaymentSession(this.window,this.config.preseeded_product_url,this.config,{stage:this.standbyTrace().stage});
+      }else result=await this.standby(this.window,this.config.preseeded_product_url,this.config,this.standbyTrace());
       this.lastIdleRefreshAt=Date.now();this.lastStandbyReady=result.status==='standby_checkout';return result;
     }
     if(this.config.standby_page==='pickup_checkout'){
@@ -250,7 +273,7 @@ export class SafariPickupBrowser {
             if(state.protected){this.lastSessionCheck.status='protected';return {status:'protected'};}
             if(now<(this.nextSessionRecoveryAt||0))return {status:'backoff'};
             this.nextSessionRecoveryAt=now+180000;
-            const result=await this.standby(this.window,this.config.preseeded_product_url,this.config,{sessionContinuationAttempted:true});
+            const result=this.config.checkout_method==='guest_credit'&&this.config.guest_auto_rearm?await prepareGuestPaymentSession(this.window,this.config.preseeded_product_url,this.config,{stage:this.standbyTrace().stage}):await this.standby(this.window,this.config.preseeded_product_url,this.config,{sessionContinuationAttempted:true});
             this.lastIdleRefreshAt=now;this.nextSessionRecoveryAt=0;this.sessionRecoveryPending=false;this.stalledProfilePending=false;this.lastStandbyReady=true;
             this.lastSessionCheck.status='recovered';
             console.info(JSON.stringify({event:'checkout_session_warning_recovery',profile:this.config.safari_profile,status:'recovered',at:new Date().toISOString()}));
@@ -272,12 +295,12 @@ export class SafariPickupBrowser {
         if(onExpired&&state.expired)await onExpired();
         if(recovery)this.sessionRecoveryPending=true;
         this.nextSessionRecoveryAt=now+180000;
-        const result=await this.standby(this.window,this.config.preseeded_product_url,this.config,{refresh:!recovery});
+        const result=recovery&&this.config.checkout_method==='guest_credit'&&this.config.guest_auto_rearm?await prepareGuestPaymentSession(this.window,this.config.preseeded_product_url,this.config,{stage:this.standbyTrace().stage}):await this.standby(this.window,this.config.preseeded_product_url,this.config,{refresh:!recovery});
         this.lastIdleRefreshAt=now;this.nextSessionRecoveryAt=0;this.sessionRecoveryPending=false;this.stalledProfilePending=false;this.lastStandbyReady=true;
         this.lastSessionCheck.status=recovery?'recovered':'ready';
         console.info(JSON.stringify({event:recovery?'checkout_session_recovery':'idle_checkout_refresh',profile:this.config.safari_profile,status:'refreshed',at:new Date().toISOString()}));
         return result;
-      }catch(error){this.lastSessionCheck={at:new Date(now).toISOString(),status:'failed',reason:error.code||'browser_error'};console.info(JSON.stringify({event:'idle_checkout_refresh',profile:this.config.safari_profile,status:'failed',reason:error.code||'browser_error',at:new Date().toISOString()}));return {status:'failed'};}
+      }catch(error){this.lastSessionCheck={at:new Date(now).toISOString(),status:'failed',reason:safeErrorCode(error)};console.info(JSON.stringify({event:'idle_checkout_refresh',profile:this.config.safari_profile,status:'failed',reason:safeErrorCode(error),at:new Date().toISOString()}));return {status:'failed'};}
     })();
     this.idleRefreshPromise=task;
     task.finally(()=>{

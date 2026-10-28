@@ -49,3 +49,11 @@ test('event trace keeps repeated stages, elapsed time, duplicate decisions and l
  const rows=readFileSync(join(root,'events.jsonl'),'utf8').trim().split('\n').map(JSON.parse);
  assert.equal(rows.length,4);assert.deepEqual(rows.map(r=>r.sequence),[1,2,3,4]);assert.equal(rows[1].previous_stage,'repeated_step');assert.ok(rows[1].since_received_ms>=100);assert.equal(rows[0].lock_owned,true);assert.equal(rows[3].lock_owned,false);assert.equal(rows[3].stage,'configuration_lock_released');assert.equal(rows[0].checkout_method,'guest_credit');
 });
+
+test('recovery errors and review mismatch evidence remain specific without arbitrary text',async()=>{
+ const {safeErrorCode}=await import('../safari/diagnostics.mjs');
+ assert.equal(safeErrorCode(Error('guest_card_keychain_unavailable')),'guest_card_keychain_unavailable');
+ assert.equal(safeErrorCode(Error('sensitive@example.com')),'browser_error');
+ const observed=sanitizeObservation({checks:{product_matches:false,payment_summary_present:true,card:'do-not-log'},available_time_count:0,store_selected:true});
+ assert.deepEqual(observed.checks,{product_matches:false,payment_summary_present:true});assert.equal(observed.available_time_count,0);assert.equal(observed.store_selected,true);assert.ok(!JSON.stringify(observed).includes('do-not-log'));
+});

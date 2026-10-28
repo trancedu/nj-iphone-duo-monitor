@@ -213,3 +213,43 @@ test('Guest confirmed failure returns to standby without synthesizing an old-sto
  f.slots[0].browser.inspectPaymentFailure=async()=>({outcome:'failed',recoverable:true,observed:true,closed:true,phase:'guest_order_failed'});f.slots[0].browser.recoverPaymentFailure=async()=>{};
  assert.equal(await e.watchPaymentFailure(),true);await delay(140);assert.equal(e.state.active,null);assert.deepEqual(f.calls,['guest']);
 });
+
+test('latest-only coalescing keeps one fresh candidate and never replays superseded stock',async t=>{
+ const f=fixture(t);f.router.config.latest_candidate_only=true;f.router.accept(f.event('working'));await turn();
+ for(const id of ['old','middle','latest'])f.router.accept(f.event(id));
+ assert.deepEqual(f.router.waiting().map(x=>x.item.event_id),['latest']);
+ assert.equal(f.slots[0].engine.state.events.old.reason,'superseded_by_newer_same_configuration');
+ f.pending.get('working').bad(new Stop('pickup_stalled_yield'));await delay(140);await turn();
+ assert.deepEqual(f.calls,['working','latest']);
+});
+test('Guest submitted results cannot be unlocked by the generic 60-second deadline',async t=>{
+ const f=fixture(t);const e=f.slots[0].engine;
+ e.state.active='pending';e.state.events.pending={...f.event('pending'),status:'order_result_unknown',timestamps:{received_at:new Date(Date.now()-120000).toISOString(),guest_order_requested_at:new Date(Date.now()-60000).toISOString()}};
+ f.router.watchProfileTimeouts();assert.equal(e.state.active,'pending');assert.equal(f.slots[0].browser.abortEventId,undefined);
+});
+
+test('a held response after preflight never leaks a reservation and blocks future maintenance',async t=>{
+ const f=fixture(t),slot=f.slots[0],event=f.event('arrived-during-release');
+ await f.router.beforeAccept(event);assert.equal(slot.reservedEvent,event.event_id);
+ slot.engine.releasing=true;assert.equal(f.router.accept(event).body.status,'held');assert.equal(slot.reservedEvent,null);
+ slot.engine.releasing=false;f.router.dispatchProfile(slot);await turn();assert.deepEqual(f.calls,[event.event_id]);
+});
+
+test('startup preparation holds only setup slots while the router still accepts fresh notifications',async t=>{
+ const f=fixture(t);f.router.config.standby_page='pickup_checkout';let finish;
+ f.slots[0].browser.seedIdle=async()=>new Promise(r=>finish=()=>r({status:'standby_checkout',zip:'07094'}));
+ const preparing=f.router.startStandbyInitialization();
+ assert.equal(f.slots[0].engine.releasing,true);assert.equal(f.router.accept(f.event('during-startup')).body.status,'held');assert.equal(f.router.waiting().length,1);
+ finish();await preparing;assert.equal(f.slots[0].engine.releasing,false);
+ await delay(140);await turn();assert.deepEqual(f.calls,['during-startup']);
+});
+
+test('expired startup session preparation does not delay ready configurations',async t=>{
+ const f=fixture(t);f.router.config.standby_page='pickup_checkout';let finish;
+ f.slots[0].browser.seedIdle=async({allowRebuild=true}={})=>!allowRebuild?{status:'needs_session_setup'}:new Promise(r=>finish=()=>r({status:'standby_checkout'}));
+ f.slots[1].browser.seedIdle=async()=>({status:'standby_checkout'});
+ const task=f.router.startStandbyInitialization();await turn();
+ assert.equal(f.slots[0].engine.releasing,true);assert.equal(f.slots[1].engine.releasing,false);
+ assert.equal(f.router.accept(f.event('other-ready',1)).body.status,'queued');await turn();assert.deepEqual(f.calls,['other-ready']);
+ finish();await task;
+});

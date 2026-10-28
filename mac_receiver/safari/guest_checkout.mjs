@@ -37,7 +37,7 @@ export function readGuestCard(env=process.env){
  if(!/^\d{13,19}$/.test(number)||!/^\d{4}$/.test(expiry)||+expiry.slice(0,2)<1||+expiry.slice(0,2)>12||!/^\d{3,4}$/.test(cvv))throw Error('invalid_guest_card_environment');
  return {number,expiry,cvv};
 }
-export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',expiry:'1230',cvv:'000'},mode='test',expected_product='',expected_store='',max_total_usd=0,contact=null,event_id=''}){
+export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',expiry:'1230',cvv:'000'},mode='test',expected_product='',expected_store='',max_total_usd=0,contact=null,event_id='',submission_expected=false}){
  const visible=e=>!!e&&!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden';
  const norm=s=>(s||'').replace(/\s+/g,' ').trim();
  const u=new URL(location.href),step=u.searchParams.get('_s');
@@ -62,6 +62,23 @@ export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',
   if(window.__duoGuestContinueRequested)throw Error('guest_continue_already_requested');
   window.__duoGuestContinueRequested=true;b.click();return {clicked:true};
  }
+ if(op==='guestOrderState'||op==='recoverGuestOrderFailure'||op==='retireGuestOrderSuccess'){
+  const key='duo_guest_order_requested_v1';let record=null;try{record=JSON.parse(sessionStorage.getItem(key)||'null');}catch{}
+  const owned=!!record&&record.event_id===event_id&&record.product===expected_product;
+  const headers=[...document.querySelectorAll('h1,h2')].filter(visible).map(e=>norm(e.textContent)).join(' ');
+  const success=/thank you for your order|order confirmation|your order (?:has been|is) (?:placed|confirmed)/i.test(headers)&&!!expected_product&&norm(document.body.innerText).includes(expected_product)&&(owned||submission_expected);
+  const errors=[...document.querySelectorAll('[role="alert"],.rs-error,.form-message-wrapper,.form-message')].filter(visible).map(e=>norm(e.textContent)).join(' ');
+  const failed=u.pathname==='/shop/checkout'&&(owned||submission_expected)&&!success&&/payment (?:was |has been )?(?:declined|failed|not authorized)|unable to (?:process|complete|authorize) (?:your |the )?payment|(?:item|product|pickup|pick.up time).{0,80}(?:no longer available|unavailable)|(?:could not|couldn[’']t|unable to) place (?:your |the )?order/i.test(errors);
+  const recoverable=failed&&u.pathname==='/shop/checkout'&&['Review','Review-init','Billing','Billing-init','PickupContact','PickupContact-init','Fulfillment','Fulfillment-init'].includes(step);
+  const observation={observed:owned||submission_expected,requested_at:owned?record.at:null,phase:success?'guest_order_confirmed':failed?'guest_order_failed':'guest_order_pending',outcome:success?'success':failed?'failed':'unknown',closed:failed||success,recoverable};
+  if(op==='guestOrderState')return observation;
+  if(op==='retireGuestOrderSuccess'){if(!success)throw Error('order_success_not_confirmed');sessionStorage.removeItem(key);return {retired:true};}
+  if(!recoverable)return {recovered:false,...observation};
+  const retiredKey='duo_guest_failed_events_v1';let retired=[];try{retired=JSON.parse(sessionStorage.getItem(retiredKey)||'[]');}catch{}
+  retired.push(event_id);sessionStorage.setItem(retiredKey,JSON.stringify(retired.slice(-100)));
+  sessionStorage.removeItem(key);
+  u.searchParams.set('_s','Fulfillment-init');location.assign(u.href);return {recovered:true};
+ }
  if(u.pathname!=='/shop/checkout'||!/^secure\d*\.store\.apple\.com$/.test(u.hostname))throw Error('guest_checkout_path_required');
  if(op==='contactReady'||op==='continuePayment'){
   if(!['PickupContact','PickupContact-init'].includes(step))return {ready:false};
@@ -72,21 +89,12 @@ export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',
   if(window.__duoGuestPaymentContinue)throw Error('guest_payment_continue_already_requested');
   window.__duoGuestPaymentContinue=true;e.click();return {clicked:true};
  }
- if(op==='guestOrderState'||op==='recoverGuestOrderFailure'){
-  const key='duo_guest_order_requested_v1';let record=null;try{record=JSON.parse(sessionStorage.getItem(key)||'null');}catch{}
-  const owned=!!record&&record.event_id===event_id&&record.product===expected_product;
-  const headers=[...document.querySelectorAll('h1,h2')].filter(visible).map(e=>norm(e.textContent)).join(' ');
-  const success=/thank you for your order|order confirmation|your order (?:has been|is) (?:placed|confirmed)/i.test(headers);
-  const errors=[...document.querySelectorAll('[role="alert"],.rs-error,.form-message-wrapper,.form-message')].filter(visible).map(e=>norm(e.textContent)).join(' ');
-  const failed=owned&&!success&&/payment (?:was |has been )?(?:declined|failed|not authorized)|unable to (?:process|complete|authorize) (?:your |the )?payment|(?:item|product|pickup|pick.up time).{0,80}(?:no longer available|unavailable)|(?:could not|couldn[’']t|unable to) place (?:your |the )?order/i.test(errors);
-  const recoverable=failed&&['Review','Review-init','Billing','Billing-init','PickupContact','PickupContact-init','Fulfillment','Fulfillment-init'].includes(step);
-  const observation={observed:owned,requested_at:owned?record.at:null,phase:success?'guest_order_confirmed':failed?'guest_order_failed':'guest_order_pending',outcome:success?'success':failed?'failed':'unknown',closed:failed||success,recoverable};
-  if(op==='guestOrderState')return observation;
-  if(!recoverable)return {recovered:false,...observation};
-  const retiredKey='duo_guest_failed_events_v1';let retired=[];try{retired=JSON.parse(sessionStorage.getItem(retiredKey)||'[]');}catch{}
-  retired.push(event_id);sessionStorage.setItem(retiredKey,JSON.stringify(retired.slice(-100)));
-  sessionStorage.removeItem(key);
-  u.searchParams.set('_s','Fulfillment-init');location.assign(u.href);return {recovered:true};
+ if(op==='restoreGuestBeforeSubmit'){
+  if(!expected_product||!norm(document.body.innerText).includes(expected_product))throw Error('guest_restore_product_not_verified');
+  if(sessionStorage.getItem('duo_guest_order_requested_v1'))throw Error('guest_submission_must_be_reconciled');
+  if(!['Fulfillment','Fulfillment-init','PickupContact','PickupContact-init','Billing','Billing-init','Review','Review-init'].includes(step))throw Error('guest_restore_step_unknown');
+  if(['Fulfillment','Fulfillment-init'].includes(step))return {restored:true,navigating:false};
+  u.searchParams.set('_s','Fulfillment-init');location.assign(u.href);return {restored:true,navigating:true};
  }
  const orderButtons=()=>[...document.querySelectorAll('button,input[type="submit"]')].filter(e=>visible(e)&&e.id==='rs-checkout-continue-button-bottom'&&e.getAttribute('data-autom')==='continue-button-placeOrder'&&/^Place (?:Your )?Order$/i.test(norm(e.innerText||e.value)));
  if(op==='reviewState'||op==='preparedReviewState'||op==='editPickupContact'||op==='editSavedBilling'||op==='placeOrder'){
@@ -229,7 +237,7 @@ export async function runGuestDOM(window,op,args={}){
  // Navigation may destroy the script reply after a successful click. Do not
  // repeat mutations; reconcile the destination instead. Read-only polls retry.
  if(!raw){
-  if(['bagCheckout','guestContinue','continuePayment','selectCredit','continueBilling','editPickupContact','editSavedBilling','placeOrder','recoverGuestOrderFailure'].includes(op))return {response_unknown:true};
+  if(['bagCheckout','guestContinue','continuePayment','selectCredit','continueBilling','editPickupContact','editSavedBilling','placeOrder','recoverGuestOrderFailure','restoreGuestBeforeSubmit'].includes(op))return {response_unknown:true};
   const error=Error('safari_script_response_unrecognized');error.code='safari_script_response_unrecognized';throw error;
  }
  const result=JSON.parse(raw);
@@ -239,7 +247,7 @@ export async function runGuestDOM(window,op,args={}){
 // Native Apple Account prompt is outside the web DOM. Only inspect sheets
 // attached to the exact isolated test profile and never send a global Escape.
 export function guestAccountPromptScript(profile,{cancel=false}={}){
- if(!['PickupTest18Pro','Duo1024White','Duo1024Black'].includes(profile))throw Error('isolated_guest_profile_required');
+ if(profile!=='PickupTest18Pro'&&!/^Duo(?:256|512|1024)(?:White|Black)$/.test(profile))throw Error('isolated_guest_profile_required');
  const quoted=JSON.stringify(profile+' — ');
  return `tell application "System Events"
  tell process "Safari"
@@ -378,7 +386,9 @@ export async function runGuestSignal(window,url,config,billing,stage=()=>{},{mod
  const destination=await waitFor(async()=>{const state=await runGuestDOM(window,'state');return state.path==='/shop/checkout'&&['Billing','Billing-init','Review','Review-init'].includes(state.step)?state:null;},config.step_timeout_ms);
  if(config.guest_payment_prepared===true){
   if(['Billing','Billing-init'].includes(destination.step))throw Error('prepared_payment_missing_manual_review');
-  const verification=await waitFor(async()=>{const state=await runGuestDOM(window,'preparedReviewState',{expected_product:expectedProduct(url),expected_store:result.store,contact:config.pickup_details});return state.ready?state:false;},config.step_timeout_ms);
+  let lastVerification,verification;
+  try{verification=await waitFor(async()=>{const state=await runGuestDOM(window,'preparedReviewState',{expected_product:expectedProduct(url),expected_store:result.store,contact:config.pickup_details});lastVerification=state;return state.ready?state:false;},config.step_timeout_ms);}
+  catch(error){mark('prepared_payment_review_failed_at',{kind:'guest_review',checks:lastVerification?.checks});throw error;}
   mark('prepared_payment_review_verified',{kind:'guest_review',payment_prepared:true,card_fields_written:false,ready:verification.ready});
   const completion=await finishGuestReview(window,{mode,product:expectedProduct(url),max_total_usd,event_id:config.handoff_event_id,stage:mark});
   return {status:completion.status,elapsed_ms:Math.round(performance.now()-start),to_review_from_refresh_ms:timings.prepared_payment_review_verified-timings.standby_refresh_requested_at,timings,completion,verification,payment_prepared:true,card_fields_written:false,payment_submitted:completion.order_requested===true};
