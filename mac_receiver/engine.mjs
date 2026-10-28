@@ -36,11 +36,32 @@ export class Engine {
   health() {
     this.expireHeld();
     return {status:'ok',mode:this.config.dry_run?'dry_run':'live',
-      browser_ready:this.browser.ready(),automation_blocked:this.browser.automationBlocked===true,active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
+      browser_ready:this.browser.ready(),recovery_pending:this.state.recovery_pending||null,recovery_retry_at:this.state.recovery_retry_at||null,automation_blocked:this.browser.automationBlocked===true,active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
       ...(this.config.idle_bag_refresh_interval_seconds?{idle_bag_refresh_interval_seconds:this.config.idle_bag_refresh_interval_seconds}:{}),
       ...(this.config.standby_page?{standby_page:this.config.standby_page,idle_checkout_refresh_interval_seconds:this.config.idle_checkout_refresh_interval_seconds,checkout_session_check_interval_seconds:this.config.checkout_session_check_interval_seconds||60,pickup_zip:this.config.pickup_zip}:{}),
       ...(this.browser.lastSessionCheck?{checkout_session_watch:this.browser.lastSessionCheck}:{}),
       ready:this.config.dry_run||this.browser.ready(),...(this.config.standby_page?{standby_page_verified:!this.state.active&&this.browser.lastStandbyReady===true}:{}),pending_events:Object.values(this.state.events).filter(x=>x.status==='held').length,apple_pay_verified:'manual_verification_required'};
+  }
+  async retryPendingRecovery(nowMs=Date.now()){
+    const id=this.state.recovery_pending,item=this.state.events[id];
+    if(!item||this.state.active||this.releasing||this.signaling||nowMs<(this.state.recovery_retry_at||0))return false;
+    this.releasing=true;this.stage(item,'automatic_recovery_retry_started_at');
+    try{
+      if(item.recovery_after_success){
+        await this.browser.rearmAfterGuestSuccess(item,(name,detail)=>this.stage(item,name,detail),{confirmedRecovery:true});item.rearm_pending=false;
+      }else if(item.recovery_after_confirmed_failure){
+        const state=await this.browser.inspectPaymentFailure(item);
+        if(state.recoverable)await this.browser.recoverPaymentFailure(item);
+        else await this.browser.restoreBeforeGuestSubmit(item);
+      }else await this.browser.restoreBeforeGuestSubmit(item);
+      item.status=item.recovery_after_success?'order_confirmed':'recovered_waiting_for_signal';delete this.state.recovery_pending;delete this.state.recovery_retry_at;delete this.state.recovery_attempts;
+      this.stage(item,'automatic_recovery_pickup_ready_at');return true;
+    }catch(error){
+      item.reason=safeErrorCode(error,'recovery_retry_failed');this.state.recovery_attempts=(this.state.recovery_attempts||0)+1;
+      // Retrying page preparation is rate-limited, never a repeated purchase.
+      this.state.recovery_retry_at=nowMs+Math.min(180000,30000*2**Math.min(3,this.state.recovery_attempts));
+      this.stage(item,'automatic_recovery_retry_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;
+    }finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
   }
   pruneHistory(max=2048){
     const records=Object.values(this.state.events);if(records.length<=max)return;
@@ -122,7 +143,7 @@ export class Engine {
         item.status='pre_submit_failed';item.release_reason=item.reason;this.reset(item.event_id,true);
         if(item.reason!=='daily_order_limit_reached')await this.browser.restoreBeforeGuestSubmit(item);
         this.stage(item,'pre_submit_pickup_restored_at');
-      }catch(error){item.status='automation_paused';item.reason=safeErrorCode(error,'pre_submit_restore_failed');this.browser.automationBlocked=true;this.state.automation_blocked=true;this.stage(item,'pre_submit_restore_failed_at',{kind:'guest_recovery',error_code:item.reason});}
+      }catch(error){item.status='recovery_pending';item.reason=safeErrorCode(error,'pre_submit_restore_failed');this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+30000;this.stage(item,'pre_submit_restore_failed_at',{kind:'guest_recovery',error_code:item.reason});}
       finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
       return;
     }
@@ -182,7 +203,7 @@ export class Engine {
           item.rearm_pending=false;this.stage(item,'post_order_pickup_ready_at');
         }
         return true;
-      }catch(error){item.status='order_confirmed_rearm_failed';item.reason=safeErrorCode(error,'post_order_setup_failed');this.browser.automationBlocked=true;this.state.automation_blocked=true;this.stage(item,'post_order_setup_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
+      }catch(error){item.status='order_confirmed_rearm_waiting';item.reason=safeErrorCode(error,'post_order_setup_failed');item.recovery_after_success=true;this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+30000;this.stage(item,'post_order_setup_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
       finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
     }
     if(state.outcome==='failed'&&state.recoverable===true){this.onGuestOutcome?.(item,'failed');return null;}
@@ -216,7 +237,7 @@ export class Engine {
       await this.browser.recoverPaymentFailure(item);
       item.status='payment_failed_returned';this.stage(item,'payment_failure_pickup_restored_at');released=true;return true;
     }catch{
-      item.status='manual_review';item.reason='payment_failure_restore_failed';this.save();this.log(item,'payment_failure_restore_failed');return false;
+      item.status=this.config.checkout_method==='guest_credit'?'recovery_pending':'manual_review';item.reason='payment_failure_restore_failed';if(this.config.checkout_method==='guest_credit'){this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+30000;item.recovery_after_confirmed_failure=true;}this.save();this.log(item,'payment_failure_restore_failed');return false;
     }finally{this.releasing=false;if(released)(this.onPaymentFailureReleased||this.onProfileReleased)?.(item.event_id);else if(this.state.active!==item.event_id)this.onProfileReleased?.(item.event_id);}
   }
   async watchIdle(nowMs=Date.now()) {

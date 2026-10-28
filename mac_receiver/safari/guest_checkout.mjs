@@ -93,7 +93,7 @@ export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',
   if(!expected_product||!norm(document.body.innerText).includes(expected_product))throw Error('guest_restore_product_not_verified');
   if(sessionStorage.getItem('duo_guest_order_requested_v1'))throw Error('guest_submission_must_be_reconciled');
   if(!['Fulfillment','Fulfillment-init','PickupContact','PickupContact-init','Billing','Billing-init','Review','Review-init'].includes(step))throw Error('guest_restore_step_unknown');
-  if(['Fulfillment','Fulfillment-init'].includes(step))return {restored:true,navigating:false};
+  if(['Fulfillment','Fulfillment-init'].includes(step)){window.__duoPickupStoreSelected=false;window.__duoPickupContinueRequested=false;window.__duoPickupAttemptAbandoned=false;return {restored:true,navigating:false};}
   u.searchParams.set('_s','Fulfillment-init');location.assign(u.href);return {restored:true,navigating:true};
  }
  const orderButtons=()=>[...document.querySelectorAll('button,input[type="submit"]')].filter(e=>visible(e)&&e.id==='rs-checkout-continue-button-bottom'&&e.getAttribute('data-autom')==='continue-button-placeOrder'&&/^Place (?:Your )?Order$/i.test(norm(e.innerText||e.value)));
@@ -108,14 +108,14 @@ export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',
    const quantities=item?[...item.querySelectorAll('.rs-quantity-text > span:not(.visuallyhidden)')].filter(visible):[];
    const payment=document.querySelector('.rs-review-billing-details')||document.querySelector('.rs-review-billing');
    const paymentText=norm(payment?.innerText);
-   const store=norm(expected_store).split(/Available Today|Currently unavailable|In-Store Pickup/i)[0].trim();
+   const store=norm(expected_store).split(/Available (?:Today|Tomorrow)|Available for pickup|Currently unavailable|Unavailable for pickup|Not available|In-Store Pickup/i)[0].replace(/\s*\d+(?:\.\d+)?\s*(?:mi|km)\s*$/i,'').trim();
    const checks={review_ready:ready,product_matches:!!expected_product&&norm(item?.querySelector('h2,h3')?.textContent)===expected_product,quantity_one:quantities.length===1&&norm(quantities[0].innerText)==='1',pickup_store_matches:!!store&&norm(document.body.innerText).includes(store),payment_summary_present:visible(payment)&&/ending|[•●*]{2,}|visa|mastercard|amex|american express|discover|unionpay|apple card/i.test(paymentText)};
    if(contact){
     const change=document.querySelector('[data-autom="pickup-changeLink"]');
     const summary=norm(change?.closest('.row.rs-review-details')?.innerText);
     checks.pickup_contact_name_matches=!!summary&&summary.includes(contact.first_name)&&summary.includes(contact.last_name);
    }
-   return {ready:Object.values(checks).every(Boolean),checks,payment_submitted:false};
+   return {ready:Object.values(checks).every(Boolean),step,checks,payment_submitted:false};
   }
   if(op==='editPickupContact'){
    if(!ready)throw Error('order_review_not_verified');
@@ -418,11 +418,12 @@ export async function runGuestSignal(window,url,config,billing,stage=()=>{},{mod
  await window.call('fillContact',{product:expectedProduct(url),contact:config.pickup_details});
  mark('pickup_contact_final_verified');
  await runGuestDOM(window,'continuePayment');mark('continue_to_payment_clicked');
- const destination=await waitFor(async()=>{const state=await runGuestDOM(window,'state');return state.path==='/shop/checkout'&&['Billing','Billing-init','Review','Review-init'].includes(state.step)?state:null;},config.step_timeout_ms);
+ const destination=await waitFor(async()=>{const state=await runGuestDOM(window,'state');return state.path==='/shop/checkout'&&['Billing','Billing-init','Review','Review-init'].includes(state.step)?state:null;},Math.min(config.step_timeout_ms||20000,10000));
  if(config.guest_payment_prepared===true){
   if(['Billing','Billing-init'].includes(destination.step))throw Error('prepared_payment_missing_manual_review');
   let lastVerification,verification;
-  try{verification=await waitFor(async()=>{const state=await runGuestDOM(window,'preparedReviewState',{expected_product:expectedProduct(url),expected_store:result.store,contact:config.pickup_details});lastVerification=state;return state.ready?state:false;},config.step_timeout_ms);}
+  let lastCheckSignature='';
+  try{verification=await waitFor(async()=>{const state=await runGuestDOM(window,'preparedReviewState',{expected_product:expectedProduct(url),expected_store:result.store,contact:config.pickup_details});lastVerification=state;if(['Fulfillment','Fulfillment-init'].includes(state.step))throw Error('guest_returned_to_pickup_before_submit');const signature=JSON.stringify(state.checks);if(signature!==lastCheckSignature){lastCheckSignature=signature;mark('prepared_payment_review_check_at',{kind:'guest_review',ready:state.ready,checks:state.checks});}return state.ready?state:false;},Math.min(config.step_timeout_ms||20000,10000));}
   catch(error){mark('prepared_payment_review_failed_at',{kind:'guest_review',checks:lastVerification?.checks});throw error;}
   mark('prepared_payment_review_verified',{kind:'guest_review',payment_prepared:true,card_fields_written:false,ready:verification.ready});
   const completion=await finishGuestReview(window,{mode,product:expectedProduct(url),max_total_usd,event_id:config.handoff_event_id,stage:mark});

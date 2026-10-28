@@ -102,21 +102,25 @@ export class SafariPickupBrowser {
     return this.window.call('paymentFailureState',{event_id:item.event_id,product:expectedProduct(item.product_url)});
   }
   captureFailureEvidence(item){return captureFailureEvidence(this,item);}
-  async rearmAfterGuestSuccess(item,stage=()=>{}){
+  async rearmAfterGuestSuccess(item,stage=()=>{},{confirmedRecovery=false}={}){
     if(!this.config.guest_auto_rearm)throw new Stop('guest_auto_rearm_disabled');
     this.lastStandbyReady=false;
-    await runGuestDOM(this.window,'retireGuestOrderSuccess',{event_id:item.event_id,expected_product:expectedProduct(item.product_url),submission_expected:true});
+    if(!confirmedRecovery)await runGuestDOM(this.window,'retireGuestOrderSuccess',{event_id:item.event_id,expected_product:expectedProduct(item.product_url),submission_expected:true});
     const result=await prepareGuestPaymentSession(this.window,item.product_url,this.config,{allowReplenish:true,stage});
     this.lastStandbyReady=true;this.lastStandbyCheckAt=Date.now();this.lastIdleRefreshAt=Date.now();return result;
   }
   async restoreBeforeGuestSubmit(item){
     this.lastStandbyReady=false;
-    if(this.config.guest_auto_rearm&&item.reason==='prepared_payment_missing_manual_review'){const r=await prepareGuestPaymentSession(this.window,item.product_url,this.config);this.lastStandbyReady=r.status==='standby_checkout';return r;}
-    const r=await runGuestDOM(this.window,'restoreGuestBeforeSubmit',{expected_product:expectedProduct(item.product_url)});
-    if(!r.restored&&!r.response_unknown)throw new Stop('pre_submit_restore_not_verified');
-    await waitFor(async()=>{const s=await runGuestDOM(this.window,'state');return ['Fulfillment','Fulfillment-init'].includes(s.step);},this.config.step_timeout_ms||20000);
-    const result=await this.standby(this.window,item.product_url,this.config,{activeRequest:true});
-    this.lastStandbyReady=result.status==='standby_checkout';return result;
+    if(this.config.guest_auto_rearm&&item.reason==='prepared_payment_missing_manual_review'){
+      const r=await prepareGuestPaymentSession(this.window,item.product_url,this.config);this.lastStandbyReady=r.status==='standby_checkout';return r;
+    }
+    const current=await runGuestDOM(this.window,'state');
+    if(current.path!=='/shop/checkout'){const r=await restoreGuestReady(this.window,item.product_url,this.config);this.lastStandbyReady=true;return r;}
+    // Retire only our pre-submit interaction flags. This refuses a financial
+    // submission marker, and never accepts a different product.
+    await runGuestDOM(this.window,'restoreGuestBeforeSubmit',{expected_product:expectedProduct(item.product_url)});
+    const result=await restoreGuestReady(this.window,item.product_url,this.config);
+    this.stalledProfilePending=false;this.lastStandbyReady=true;this.lastStandbyCheckAt=Date.now();return result;
   }
   async expirePaymentWindow(item){
     this.lastStandbyReady=false;

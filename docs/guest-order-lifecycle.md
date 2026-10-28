@@ -74,3 +74,13 @@
 修复：在会话准备阶段，通过Safari的Window菜单唯一匹配profile并选择，等待桌面空间切换；同时检查目标窗口sheet和独立原生对话框。必须同时匹配Sign in、store.apple.com、Account、Use a different Account、Cancel才能取消。目标尚未可见返回target_window_not_visible，绝不声称没有弹窗；未知系统对话框不盲点、不发送全局ESC。
 
 Guest切入后，配送/付款准备结束、回到Pickup/07094时再做一次原生登录弹窗检查。仅在会话准备/恢复阶段切换目标窗口，不把这一步加进库存通知的刷新与下单关键路径。
+
+## Available Tomorrow 与提交前恢复（2026-10-28）
+
+真实事件512黑/West 14th Street（19:28:49美东接收）显示Available Tomorrow。旧门店校验只剥离Available Today，导致把Tomorrow标签拼进预期店名，阻止了自动Place Your Order。现统一剥离Today/Tomorrow/距离文本，保留目标门店、商品、数量、金额的核对；回归用例先复现旧失败，再验证修复与最终按钮仅点击一次。
+
+确认页校验日志现在在checks变化时立即记录，不再只保存超时最后一次（用户手动操作或Apple退回Pickup可能覆盖最后状态）。准备模式Continue后的目的页等待和Review校验各最多10秒；如果已退回Fulfillment立即结束旧尝试并恢复，不继续等一个已消失的Review。
+
+普通提交前恢复失败不再永久automation_paused：释放旧任务锁，记录recovery_pending，30秒后尝试页面恢复，连续失败按60/120/180秒退避；未恢复前只暂存最新同款通知，旧通知照常过期，不执行购买。恢复成功再接受最新有效通知。未知付款结果、验证码、权限缺失不伪装成已恢复。
+
+恢复Pickup使用最轻恢复函数，并先清除属于旧提交前尝试的store/continue标记，避免真实已退回Pickup却因旧标记报standby_checkout_protected；存在提交标记时仍拒绝清除。

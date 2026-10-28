@@ -213,3 +213,28 @@ test('a hidden full-screen target never counts as absence of an account dialog',
  await assert.rejects(()=>cancelGuestSignIn({},()=>{},{now:()=>clock,pause:async ms=>clock+=ms,probe:async cancel=>{if(cancel)cancels++;return 'target_window_not_visible';}}),/guest_target_window_not_visible/);
  assert.equal(cancels,0);assert.ok(clock>=4000);
 });
+
+test('prepared review accepts tomorrow pickup labels and strips appended distance without weakening store checks',async t=>{
+ const f=await reviewFixture(t);
+ await f.page.evaluate(()=>{const payment=document.createElement('div');payment.className='rs-review-billing-details';payment.innerText='Visa ending in 0000';document.body.append(payment);const store=document.createElement('p');store.innerText='Pick up at Apple West 14th Street';document.body.append(store);});
+ const args={op:'preparedReviewState',expected_product:'iPhone 18 Pro 256GB Burgundy'};
+ for(const label of ['Apple West 14th StreetAvailable TomorrowIn-Store Pickup','Apple West 14th Street2.45 miAvailable TomorrowIn-Store Pickup','Apple West 14th Street Available Today In-Store Pickup'])assert.equal((await f.page.evaluate(guestCheckoutDOM,{...args,expected_store:label})).ready,true,label);
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,{...args,expected_store:'Apple Queens CenterAvailable TomorrowIn-Store Pickup'})).ready,false);
+ assert.equal(await f.page.evaluate(()=>window.orders||0),0);
+});
+
+test('tomorrow review can reach exactly one production final click after verification',async t=>{
+ const f=await reviewFixture(t);
+ await f.page.evaluate(()=>{const p=document.createElement('div');p.className='rs-review-billing-details';p.innerText='Visa ending in 0000';document.body.append(p);const s=document.createElement('p');s.innerText='Apple West 14th Street';document.body.append(s);});
+ const state=await f.page.evaluate(guestCheckoutDOM,{op:'preparedReviewState',expected_product:'iPhone 18 Pro 256GB Burgundy',expected_store:'Apple West 14th StreetAvailable TomorrowIn-Store Pickup'});
+ assert.equal(state.ready,true);assert.equal((await f.order({mode:'production'})).order_requested,true);
+ assert.equal(await f.page.evaluate(()=>window.orders),1);await assert.rejects(()=>f.order({mode:'production'}),/already_requested/);
+});
+test('pre-submit recovery clears stale pickup selection flags but never clears a submitted order',async t=>{
+ const f=await reviewFixture(t);
+ await f.page.evaluate(()=>{history.replaceState(null,'','?_s=Fulfillment');window.__duoPickupStoreSelected=true;window.__duoPickupContinueRequested=true;});
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,{op:'restoreGuestBeforeSubmit',expected_product:'iPhone 18 Pro 256GB Burgundy'})).restored,true);
+ assert.equal(await f.page.evaluate(()=>window.__duoPickupStoreSelected),false);
+ await f.page.evaluate(()=>sessionStorage.setItem('duo_guest_order_requested_v1','{}'));
+ await assert.rejects(()=>f.page.evaluate(guestCheckoutDOM,{op:'restoreGuestBeforeSubmit',expected_product:'iPhone 18 Pro 256GB Burgundy'}),/submission_must_be_reconciled/);
+});

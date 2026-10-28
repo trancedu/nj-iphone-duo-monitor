@@ -50,3 +50,27 @@ test('old terminal history compacts but live or unresolved requests remain prote
  for(const id of ['old-a','old-b','live'])e.state.events[id]={event_id:id,status:id==='live'?'order_result_unknown':'expired',timestamps:{received_at:new Date(Date.now()-700000).toISOString()}};
  e.pruneHistory(1);assert.deepEqual(Object.keys(e.state.events),['live']);
 });
+
+test('pre-submit restore failure schedules bounded background preparation without permanently pausing configuration',async t=>{
+ const {dir}=fixture(t);let restores=0;
+ const browser={ready:()=>true,prepare:async()=>{throw Error('safari_step_timeout');},restoreBeforeGuestSubmit:async()=>{restores++;if(restores===1)throw Error('standby_checkout_protected');}};
+ const e=new Engine({state_dir:dir,checkout_method:'guest_credit'},browser),item={...ev('recover'),timestamps:{received_at:new Date().toISOString()},status:'queued'};
+ e.state.active=item.event_id;e.state.events[item.event_id]=item;await e.execute(item);
+ assert.equal(e.state.active,null);assert.equal(item.status,'recovery_pending');assert.equal(browser.automationBlocked,undefined);assert.equal(e.state.recovery_pending,item.event_id);
+ const before=e.state.recovery_retry_at;assert.equal(await e.retryPendingRecovery(before-1),false);assert.equal(restores,1);
+ assert.equal(await e.retryPendingRecovery(before),true);assert.equal(restores,2);assert.equal(e.state.recovery_pending,undefined);assert.equal(item.status,'recovered_waiting_for_signal');
+});
+test('repeated restoration failures back off and never replay a purchase',async t=>{
+ const {dir}=fixture(t);let attempts=0;
+ const e=new Engine({state_dir:dir,checkout_method:'guest_credit'},{ready:()=>true,restoreBeforeGuestSubmit:async()=>{attempts++;throw Error('safari_apple_event_failed');}});
+ e.state.events.one={...ev('one'),status:'recovery_pending',timestamps:{}};e.state.recovery_pending='one';
+ await e.retryPendingRecovery(1000);assert.equal(e.state.recovery_retry_at,61000);await e.retryPendingRecovery(61000);assert.equal(e.state.recovery_retry_at,181000);assert.equal(attempts,2);assert.equal(e.state.active,null);
+});
+
+test('successful order re-preparation failure retains success and retries setup without another order',async t=>{
+ const {dir}=fixture(t);let setups=0;
+ const e=new Engine({state_dir:dir,checkout_method:'guest_credit',guest_auto_rearm:true},{ready:()=>true,inspectPaymentFailure:async()=>({outcome:'success',observed:true}),rearmAfterGuestSuccess:async(item,stage,options)=>{setups++;if(setups===1)throw Error('safari_step_timeout');assert.equal(options.confirmedRecovery,true);}});
+ const item={...ev('one'),status:'awaiting_user',timestamps:{guest_order_requested_at:new Date().toISOString()}};e.state.events.one=item;e.state.active='one';
+ await e.watchPaymentFailure();assert.equal(e.state.active,null);assert.equal(item.status,'order_confirmed_rearm_waiting');assert.equal(e.state.recovery_pending,'one');assert.equal(e.browser.automationBlocked,undefined);
+ await e.retryPendingRecovery(e.state.recovery_retry_at);assert.equal(item.status,'order_confirmed');assert.equal(item.rearm_pending,false);assert.equal(setups,2);
+});
