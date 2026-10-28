@@ -93,3 +93,12 @@ test('manual recovery requires explicit intent and reuses an existing pickup pag
  const result=await f.page.evaluate(paymentLifecycleDOM,{op:'manualRetryPickup',args:{event_id:'manual-new',product,confirm_manual_retry:true}});
  assert.deepEqual(result,{returned:true,navigating:false});assert.equal(await f.page.evaluate(()=>performance.timeOrigin),before);assert.equal(await f.page.evaluate(()=>window.__duoApplePayRequested),false);
 });
+test('Guest order observation never starts an Apple Pay timer and only explicit failure restores pickup',async t=>{
+ const root=mkdtempSync(join(tmpdir(),'guest-payment-watch-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+ let state={observed:true,requested_at:new Date().toISOString(),phase:'guest_order_pending',outcome:'unknown',recoverable:false},restored=0;
+ const e=new Engine({state_dir:root},{ready:()=>true,inspectPaymentFailure:async()=>state,recoverPaymentFailure:async()=>{restored++;}});
+ e.state.active='guest';e.state.events.guest={event_id:'guest',status:'awaiting_user',timestamps:{guest_order_requested_at:new Date().toISOString()}};
+ assert.equal(await e.watchPaymentFailure(1000),false);assert.equal(e.state.events.guest.timestamps.apple_pay_sheet_requested_at,undefined);assert.equal(e.paymentDeadlineTimer,undefined);
+ state={...state,phase:'guest_order_failed',outcome:'failed',closed:true,recoverable:true};
+ assert.equal(await e.watchPaymentFailure(2001),true);assert.equal(restored,1);assert.equal(e.state.active,null);
+});

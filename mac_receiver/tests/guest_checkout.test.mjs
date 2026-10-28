@@ -110,7 +110,7 @@ test('Billing Continue validates fields and runs once; test still never places a
 async function reviewFixture(t,{quantity=1,total='$1,278.43'}={}){
  const f=await fixture(t);await f.page.goto('https://secure7.store.apple.com/shop/checkout?_s=Review');
  await f.page.setContent(`<h1>Ready to place your order?</h1><div data-autom="bag-item-1"><h2>iPhone 18 Pro 256GB Burgundy</h2><div class="rs-quantity-text"><span class="visuallyhidden">Quantity</span><span>${quantity}</span></div></div><div data-autom="bagtotalvalue">${total}</div><button id="rs-checkout-continue-button-bottom" data-autom="continue-button-placeOrder" onclick="window.orders=(window.orders||0)+1">Place Your Order</button>`);
- return {...f,order:args=>f.page.evaluate(guestCheckoutDOM,{op:'placeOrder',expected_product:'iPhone 18 Pro 256GB Burgundy',max_total_usd:1300,...args})};
+ return {...f,order:args=>f.page.evaluate(guestCheckoutDOM,{op:'placeOrder',event_id:'test-order',expected_product:'iPhone 18 Pro 256GB Burgundy',max_total_usd:1300,...args})};
 }
 test('test review always stops before Place Your Order',async t=>{
  const f=await reviewFixture(t);assert.equal((await f.call('reviewState')).ready,true);
@@ -141,12 +141,69 @@ test('Guest contact accepts shortened Continue only on the verified contact page
  assert.equal((await f.call('contactReady')).ready,true);
  await f.page.locator('h1').evaluate(e=>e.textContent='Different step');assert.equal((await f.call('contactReady')).ready,false);
 });
-test('saved Review payment is reused only when card tail and full visible address match',async t=>{
- const f=await reviewFixture(t);await f.page.evaluate(()=>{const e=document.createElement('div');e.className='rs-review-billing';e.innerText='Visa ending in 1111 Test Example 1 Example Street Secaucus, NJ 07094';document.body.append(e);});
- const args={op:'verifySavedReview',billing:sampleBilling,card:{number:'4111111111111111',expiry:'1230',cvv:'000'}};
- const saved=await f.page.evaluate(guestCheckoutDOM,args);assert.equal(saved.ready,true);assert.equal(saved.payment_details_reused,true);
- const wrong=await f.page.evaluate(guestCheckoutDOM,{...args,card:{...args.card,number:'0000000000009999'}});assert.equal(wrong.ready,false);
- const wrongAddress=await f.page.evaluate(guestCheckoutDOM,{...args,billing:{...sampleBilling,street:'2 Different Street'}});assert.equal(wrongAddress.ready,false);
- const wrongUnit=await f.page.evaluate(guestCheckoutDOM,{...args,billing:{...sampleBilling,street2:'Apt 6M'}});assert.equal(wrongUnit.ready,false);
+
+test('card fields are re-entered on every fill, while unchanged ZIP does not retrigger lookup',async t=>{
+ const f=await fixture(t,'separate');
+ await f.page.locator('input[id$=".cardNumber"]').evaluate(e=>e.addEventListener('input',()=>window.cardWrites=(window.cardWrites||0)+1));
+ await f.page.locator('input[id$=".postalCode"]').evaluate(e=>e.addEventListener('input',()=>window.zipWrites=(window.zipWrites||0)+1));
+ await f.call('fillBilling');await f.call('fillBilling');
+ assert.equal(await f.page.evaluate(()=>window.cardWrites),4);assert.equal(await f.page.evaluate(()=>window.zipWrites),1);
+});
+test('editing retained payment returns Billing without init suffix; fill and Continue remain valid',async t=>{
+ const f=await fixture(t,'separate');await f.page.goto('https://secure7.store.apple.com/shop/checkout?_s=Billing');
+ await f.page.locator('button').evaluate(e=>e.id='rs-checkout-continue-button-bottom');
+ await f.call('fillBilling');assert.equal((await f.call('billingTick')).ready,true);
+ assert.equal((await f.call('continueBilling')).continue_requested,true);
+});
+test('pre-prepared Review verifies target, quantity, store and payment without filling card',async t=>{
+ const f=await reviewFixture(t);
+ await f.page.evaluate(()=>{const e=document.createElement('div');e.className='rs-review-billing-details';e.innerText='Visa ending in 2349';document.body.append(e);const s=document.createElement('div');s.innerText='Pick up at Apple American Dream';document.body.append(s);});
+ const args={op:'preparedReviewState',expected_product:'iPhone 18 Pro 256GB Burgundy',expected_store:'Apple American DreamAvailable TodayIn-Store Pickup'};
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,args)).ready,true);
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,{...args,expected_store:'Apple Queens Center'})).ready,false);
+ await f.page.locator('.rs-review-billing-details').evaluate(e=>e.remove());
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,args)).ready,false);
  assert.equal(await f.page.evaluate(()=>window.orders||0),0);
+});
+
+test('Guest order failure observer is event-bound and never treats generic errors or success as retryable',async t=>{
+ const f=await reviewFixture(t);await f.order({mode:'production'});
+ const args={op:'guestOrderState',event_id:'test-order',expected_product:'iPhone 18 Pro 256GB Burgundy'};
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,args)).outcome,'unknown');
+ await f.page.evaluate(()=>{const e=document.createElement('div');e.setAttribute('role','alert');e.innerText='Something went wrong';document.body.append(e);});
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,args)).recoverable,false);
+ await f.page.locator('[role=alert]').evaluate(e=>e.innerText='Your payment was declined');
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,args)).recoverable,true);
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,{...args,event_id:'other-event'})).recoverable,false);
+ await f.page.locator('h1').evaluate(e=>e.textContent='Thank you for your order');
+ const confirmed=await f.page.evaluate(guestCheckoutDOM,args);assert.equal(confirmed.outcome,'success');assert.equal(confirmed.recoverable,false);
+});
+test('confirmed Guest failure returns to pickup and retires the old event',async t=>{
+ const f=await reviewFixture(t);await f.order({mode:'production'});
+ await f.page.evaluate(()=>{const e=document.createElement('div');e.setAttribute('role','alert');e.innerText='Your payment was declined';document.body.append(e);});
+ const result=await f.page.evaluate(guestCheckoutDOM,{op:'recoverGuestOrderFailure',event_id:'test-order',expected_product:'iPhone 18 Pro 256GB Burgundy'});
+ assert.equal(result.recovered,true);await f.page.waitForURL(/_s=Fulfillment-init/);
+ assert.equal(await f.page.evaluate(()=>sessionStorage.getItem('duo_guest_order_requested_v1')),null);
+ assert.deepEqual(await f.page.evaluate(()=>JSON.parse(sessionStorage.getItem('duo_guest_failed_events_v1'))),['test-order']);
+});
+
+test('Keychain source fails closed without falling back to card environment values',async()=>{
+ const {readGuestCard}=await import('../safari/guest_checkout.mjs');
+ assert.throws(()=>readGuestCard({APPLE_GUEST_CARD_SOURCE:'keychain',APPLE_GUEST_KEYCHAIN_HELPER:'/nonexistent/iphone-duo-helper',APPLE_GUEST_CARD_NUMBER:'sensitive-marker',APPLE_GUEST_CARD_CVV:'sensitive-marker'}),e=>e.message==='guest_card_keychain_unavailable'&&!e.message.includes('sensitive-marker'));
+ assert.throws(()=>readGuestCard({APPLE_GUEST_CARD_SOURCE:'unknown'}),/unknown_guest_card_source/);
+});
+
+test('CVV subtraction restores three digits including leading zeroes and rejects invalid encodings',async()=>{
+ const {decodeGuestCVV,readGuestCard}=await import('../safari/guest_checkout.mjs');
+ for(const original of ['000','007','123','999'])assert.equal(decodeGuestCVV(String(1003-Number(original)),'subtract_1003'),original);
+ assert.equal(decodeGuestCVV('123','plain'),'123');
+ for(const value of ['0','3','1004','-1','bad',''])assert.throws(()=>decodeGuestCVV(value,'subtract_1003'),/invalid_guest_cvv_encoding/);
+ assert.throws(()=>decodeGuestCVV('880','unknown'),/unknown_guest_cvv_encoding/);
+ assert.equal(readGuestCard({APPLE_GUEST_CARD_NUMBER:'0000000000000000',APPLE_GUEST_CARD_EXPIRY:'12/30',APPLE_GUEST_CARD_CVV:'880',APPLE_GUEST_CVV_MODE:'subtract_1003'}).cvv,'123');
+});
+
+test('989 CVV encoding restores leading zeroes and supports negative stored values',async()=>{
+ const {decodeGuestCVV}=await import('../safari/guest_checkout.mjs');
+ for(const cvv of ['000','007','123','989','990','999'])assert.equal(decodeGuestCVV(String(989-Number(cvv)),'subtract_989'),cvv);
+ for(const value of ['990','-11','NaN','1.5'])assert.throws(()=>decodeGuestCVV(value,'subtract_989'),/invalid_guest_cvv_encoding/);
 });

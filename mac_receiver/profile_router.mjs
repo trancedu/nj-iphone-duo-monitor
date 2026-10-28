@@ -42,7 +42,7 @@ export class ProfileRouter {
             writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:null,claimed_at:null}),{mode:0o600});
           }
           const failed=slot.engine.state.events[id];
-          if(!this.latestRecentCandidate(null,Date.now(),slot)&&failed&&(failed.payment_failure_retry_count||0)<1){
+          if(slot.browser.config?.checkout_method!=='guest_credit'&&!this.latestRecentCandidate(null,Date.now(),slot)&&failed&&(failed.payment_failure_retry_count||0)<1){
             // This is a local recheck, not a new claim of API-observed stock.
             // prepareSafari must refresh and observe live availability again.
             this.holdRecent(slot,{event_id:'payment-recheck-'+randomUUID(),product_url:failed.product_url,detected_at:new Date().toISOString(),pickup_zip:failed.pickup_zip||this.config.pickup_zip,store_name:failed.store_name,store_id:failed.store_id,payment_failure_retry_count:(failed.payment_failure_retry_count||0)+1,payment_failure_retry_of:failed.payment_failure_retry_of||id,...(failed.simulation_no_payment===true?{simulation_no_payment:true}:{})});
@@ -343,7 +343,7 @@ export class ProfileRouter {
   }
   health(){
     if(this.config.per_profile_requests)this.expirePaymentLease();
-    const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],checkout_method:s.browser.config?.checkout_method||'apple_pay',guest_auto_place_order:s.browser.config?.guest_auto_place_order===true,...s.engine.health()}));
+    const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],checkout_method:s.browser.config?.checkout_method||'apple_pay',guest_payment_prepared:s.browser.config?.guest_payment_prepared===true,guest_auto_place_order:s.browser.config?.guest_auto_place_order===true,...s.engine.health()}));
     this.expireWaiting();
     return {status:'ok',...(this.config.per_profile_requests?{execution_policy:'per_configuration',global_locked:false,profile_lock_timeout_seconds:this.config.global_lock_timeout_seconds||60,stall_handoff_seconds:this.config.stall_handoff_seconds,payment_panel_owner:this.paymentOwner||null,payment_panel_cooldown_seconds:10,payment_panel_claimed_at:this.paymentOwner?this.paymentClaimedAt:null}:{}),...(this.config.listener_status?{listener_status:this.config.listener_status}:{}),busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.config.protect_stock_from_timeout!==false&&this.stockProtected(),protect_stock_from_timeout:this.config.protect_stock_from_timeout!==false,recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
   }
@@ -396,9 +396,9 @@ export async function main() {
       const endpoint=cfg.browser_backend==='safari'?s.safari_profile:s.cdp_endpoint;
       if(!endpoint||!/^[A-F]$/.test(s.label)||labels.has(s.label)||endpoints.has(endpoint)||states.has(state_dir))throw new Stop('duplicate_profile_slot');
       labels.add(s.label);endpoints.add(endpoint);states.add(state_dir);lock(state_dir);
-      const c={...cfg,checkout_method:s.checkout_method||'apple_pay',guest_auto_place_order:s.guest_auto_place_order===true,guest_billing:s.guest_billing||cfg.guest_billing,guest_max_total_usd:s.guest_max_total_usd,slots:undefined,profile_label:s.label,preseeded_product_url:s.product_url,preseed_on_release:true,warm_product_pages:false,cdp_endpoint:s.cdp_endpoint,safari_profile:s.safari_profile,state_dir};
+      const c={...cfg,checkout_method:s.checkout_method||'apple_pay',guest_auto_place_order:s.guest_auto_place_order===true,guest_payment_prepared:s.guest_payment_prepared===true,guest_billing:s.guest_billing||cfg.guest_billing,guest_max_total_usd:s.guest_max_total_usd,slots:undefined,profile_label:s.label,preseeded_product_url:s.product_url,preseed_on_release:true,warm_product_pages:false,cdp_endpoint:s.cdp_endpoint,safari_profile:s.safari_profile,state_dir};
       if(cfg.single_active_request||cfg.per_profile_requests)Object.assign(c,{queue_while_busy:false,queue_when_browser_not_ready:false,auto_release_unavailable:cfg.release_global_on_unavailable===true,release_on_task_tab_close:false,handoff_idle_timeout_seconds:0,idle_bag_refresh_interval_seconds:0});
-      if(!['apple_pay','guest_credit'].includes(c.checkout_method)||(c.checkout_method==='guest_credit'&&(!['E','F'].includes(s.label)||!['Duo1024White','Duo1024Black'].includes(s.safari_profile))))throw new Stop('invalid_guest_slot');
+      if(!['apple_pay','guest_credit'].includes(c.checkout_method)||(c.checkout_method==='guest_credit'&&(!/^[A-F]$/.test(s.label)||!/^Duo(?:256|512|1024)(?:White|Black)$/.test(s.safari_profile))))throw new Stop('invalid_guest_slot');
       const browser=cfg.browser_backend==='safari'?new SafariPickupBrowser(c):new PickupBrowser(c);await browser.start();const engine=new Engine(c,browser);slots.push({...s,browser,engine});
     }
     const router=new ProfileRouter(cfg,slots);

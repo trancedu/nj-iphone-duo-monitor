@@ -289,3 +289,12 @@ test('another product owns payment panel: preparation finishes without clicking 
  const result=await prepareSafari(f.window,url,{...config,open_apple_pay_sheet:true},{tryClaimApplePay:()=>false,mayForeground:()=>false});
  assert.equal(result.status,'awaiting_user');assert.equal(result.finalApplePayClicked,false);assert.equal(result.paymentPanelDeferred,true);assert.equal(foreground,0);assert.equal(f.counts().forbidden,0);
 });
+test('short Guest fulfillment Continue remains gated by store/date/time verification',async t=>{
+ const f=await fixture(t,{existing:true});
+ await f.page.goto('https://www.apple.com/checkout');
+ // The narrow Guest override is valid only on Apple's Guest checkout path.
+ await f.page.evaluate(()=>history.replaceState(null,'','/shop/checkout?_s=Fulfillment'));
+ const b=f.page.getByRole('button',{name:'Continue to Pickup Details',exact:true});
+ await b.evaluate(e=>{e.id='rs-checkout-continue-button-bottom';e.textContent='Continue';});
+ await assert.rejects(()=>f.window.call('continuePickup',{guest_checkout:true,expected_time:'missing'}),/pickup_time_not_selected/);
+});

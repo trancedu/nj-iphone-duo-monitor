@@ -2,6 +2,8 @@
 import {SafariWindow,listSafariWindows,prepareSafari,prepareSafariStandby,waitFor} from './shopping.mjs';
 import {runGuestSignal,prepareGuestStandby,runGuestDOM} from './guest_checkout.mjs';
 import {signalSafari} from './feedback.mjs';
+import {appendDiagnostic} from './diagnostics.mjs';
+import {join} from 'node:path';
 import {Stop,expectedProduct} from '../protocol.mjs';
 export class SafariPickupBrowser {
   constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,standby=prepareSafariStandby,signal=signalSafari}={}) {
@@ -35,7 +37,11 @@ export class SafariPickupBrowser {
     cfg.pickup_zip=process.env.APPLE_PICKUP_ZIP??(this.config.standby_page==='pickup_checkout'?this.config.pickup_zip:event.pickup_zip)??this.config.pickup_zip;
     if(event.store_name)cfg.pickup_details.store_name=/^Apple\s/.test(event.store_name)?event.store_name:'Apple '+event.store_name;
     const context={backend:'safari',profile:this.config.safari_profile,window_id:this.window.id,requested_store_name:cfg.pickup_details.store_name,requested_store_id:event.store_id};
-    const observe=(name,detail)=>stage(name,detail?{...detail,...context}:undefined);
+    const observe=(name,detail)=>stage(name,{...detail,...context});
+    const metrics=new Map(),previousMetric=this.window.onMetric,previousState=this.window.onGuestState;
+    this.window.onMetric=m=>{const op=m.op.replace(/[A-Z]/g,c=>'_'+c.toLowerCase());const v=metrics.get(op)||{count:0,total_ms:0,max_ms:0,dom_ms:0};v.count++;v.total_ms+=m.bridge_ms||0;v.max_ms=Math.max(v.max_ms,m.bridge_ms||0);v.dom_ms+=m.dom_ms||0;metrics.set(op,v);};
+    let lastGuestState=null;
+    this.window.onGuestState=page=>{if(JSON.stringify(page)!==JSON.stringify(lastGuestState)){lastGuestState=page;observe('guest_page_transition_at',{kind:'guest_page',page});}};
     const guard=()=>{
       const limit=this.config.per_profile_requests?(this.config.global_lock_timeout_seconds||60)*1000:0;
       if(this.abortEventId===event.event_id||(limit&&Date.now()-Date.parse(event.timestamps?.received_at||event.detected_at)>limit))throw new Stop('pickup_task_deadline');
@@ -61,6 +67,9 @@ export class SafariPickupBrowser {
         }
       }
       throw error;
+    }finally{
+      this.window.onMetric=previousMetric;this.window.onGuestState=previousState;
+      for(const [operation,metric] of metrics)observe('browser_operation_summary_at',{kind:'browser_operation',operation,...metric});
     }
   }
   async manualRetryToPickup(item){
@@ -81,6 +90,7 @@ export class SafariPickupBrowser {
     return {status:'standby_checkout'};
   }
   async inspectPaymentFailure(item){
+    if(this.config.checkout_method==='guest_credit')return runGuestDOM(this.window,'guestOrderState',{event_id:item.event_id,expected_product:expectedProduct(item.product_url)});
     return this.window.call('paymentFailureState',{event_id:item.event_id,product:expectedProduct(item.product_url)});
   }
   async expirePaymentWindow(item){
@@ -101,6 +111,15 @@ export class SafariPickupBrowser {
     return {status:'standby_checkout'};
   }
   async recoverPaymentFailure(item){
+    if(this.config.checkout_method==='guest_credit'){
+      this.lastStandbyReady=false;const product=expectedProduct(item.product_url);
+      const result=await runGuestDOM(this.window,'recoverGuestOrderFailure',{event_id:item.event_id,expected_product:product});
+      if(!result.recovered&&!result.response_unknown)throw new Stop('guest_failure_no_longer_confirmed');
+      await waitFor(async()=>{const s=await this.window.call('standbyState',{product});if(s.checkout&&!s.pickup_selected)await this.window.call('pickup',{product});return s.pickup_ready&&s.pickup_selected;},this.config.step_timeout_ms||20000);
+      const ready=await this.window.call('armPickupStandby',{product,explicit_test_reset:true});
+      if(!ready.ready||ready.protected)throw new Stop('guest_failure_pickup_not_ready');
+      this.stalledProfilePending=false;this.lastStandbyReady=true;return {status:'standby_checkout'};
+    }
     this.lastStandbyReady=false;
     const product=expectedProduct(item.product_url);
     const claim=await this.window.call('recoverPaymentFailure',{event_id:item.event_id,product});
@@ -193,7 +212,7 @@ export class SafariPickupBrowser {
     if(refreshDue)this.lastIdleRefreshAt=now;
     const task=(async()=>{
       try{
-        if(this.config.checkout_method==='guest_credit'){const guest=await runGuestDOM(this.window,'state');if(guest.path==='/shop/checkout'&&['PickupContact-init','Billing-init','Review','Review-init'].includes(guest.step)){this.lastSessionCheck={at:new Date(now).toISOString(),status:'protected'};this.lastStandbyReady=false;return {status:'protected'};}}
+        if(this.config.checkout_method==='guest_credit'){const guest=await runGuestDOM(this.window,'state');if(guest.path==='/shop/checkout'&&['PickupContact','PickupContact-init','Billing','Billing-init','Review','Review-init'].includes(guest.step)){this.lastSessionCheck={at:new Date(now).toISOString(),status:'protected'};this.lastStandbyReady=false;return {status:'protected'};}}
         // A selected store, details page or payment sheet is never maintained.
         const product=expectedProduct(this.config.preseeded_product_url);
         let state=await this.window.call('standbyState',{product});
@@ -261,7 +280,10 @@ export class SafariPickupBrowser {
       }catch(error){this.lastSessionCheck={at:new Date(now).toISOString(),status:'failed',reason:error.code||'browser_error'};console.info(JSON.stringify({event:'idle_checkout_refresh',profile:this.config.safari_profile,status:'failed',reason:error.code||'browser_error',at:new Date().toISOString()}));return {status:'failed'};}
     })();
     this.idleRefreshPromise=task;
-    task.finally(()=>{if(this.idleRefreshPromise===task)this.idleRefreshPromise=null;}).catch(()=>{});
+    task.finally(()=>{
+      if(this.idleRefreshPromise===task)this.idleRefreshPromise=null;
+      if(this.config.state_dir)appendDiagnostic(join(this.config.state_dir,'session-watch.jsonl'),{at:new Date().toISOString(),profile:this.config.safari_profile,window_id:this.window?.id,check_interval_seconds:checkSeconds,refresh_due:refreshDue,expired_only:expiredOnly,elapsed_ms:Date.now()-now,standby_ready:this.lastStandbyReady===true,...this.lastSessionCheck});
+    }).catch(()=>{});
     return task;
   }
   async _refreshIdleBag(){

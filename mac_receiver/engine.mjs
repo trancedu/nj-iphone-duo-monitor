@@ -1,4 +1,4 @@
-import {mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, appendFileSync} from 'node:fs';
+import {mkdirSync, readFileSync, writeFileSync, renameSync, existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {fingerprint, Stop} from './protocol.mjs';
 import {sanitizeObservation,appendDiagnostic} from './safari/diagnostics.mjs';
@@ -26,8 +26,11 @@ export class Engine {
     renameSync(this.file+'.tmp',this.file);
   }
   log(item,stage) {
-    appendFileSync(join(this.config.state_dir,'events.jsonl'),JSON.stringify({at:now(),event_id:item.event_id,
-      status:item.status,reason:item.reason,idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at,release_reason:item.release_reason,payment_watch:item.payment_watch,payment_failure_retry_of:item.payment_failure_retry_of,product_url:item.product_url,store_id:item.store_id,store_name:item.store_name,profile_label:this.config.profile_label,browser_backend:this.config.browser_backend||'chrome',stage,timestamps:item.timestamps})+'\n',{mode:0o600});
+    const at=now(),ms=Date.parse(at),age=t=>Number.isFinite(Date.parse(t))?ms-Date.parse(t):null;
+    const trace={sequence:(item.trace_sequence||0)+1,previous_stage:item.trace_last_stage||null,since_previous_stage_ms:age(item.trace_last_at),since_received_ms:age(item.timestamps?.received_at),since_execution_ms:age(item.timestamps?.execution_started_at),signal_age_ms:age(item.timestamps?.detected_at),active_event_id:this.state.active,lock_owned:this.state.active===item.event_id,checkout_method:this.config.checkout_method||'apple_pay',simulation_no_payment:item.simulation_no_payment===true};
+    item.trace_sequence=trace.sequence;item.trace_last_stage=stage;item.trace_last_at=at;
+    appendDiagnostic(join(this.config.state_dir,'events.jsonl'),{schema_version:2,at,event_id:item.event_id,...trace,
+      status:item.status,reason:item.reason,idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at,release_reason:item.release_reason,payment_watch:item.payment_watch,payment_failure_retry_of:item.payment_failure_retry_of,product_url:item.product_url,store_id:item.store_id,store_name:item.store_name,profile_label:this.config.profile_label,browser_backend:this.config.browser_backend||'chrome',stage,timestamps:item.timestamps});
   }
   health() {
     this.expireHeld();
@@ -42,8 +45,8 @@ export class Engine {
     this.expireHeld();
     const prior=Object.hasOwn(this.state.events,event.event_id)?this.state.events[event.event_id]:null;
     if (prior) {
-      if (prior.fingerprint!==fingerprint(event)) return {code:409,body:{event_id:event.event_id,status:'event_id_conflict'}};
-      return {code:200,body:this.public(prior)};
+      if (prior.fingerprint!==fingerprint(event)) {this.log(prior,'duplicate_event_conflict');return {code:409,body:{event_id:event.event_id,status:'event_id_conflict'}};}
+      this.log(prior,'duplicate_event_ignored');return {code:200,body:this.public(prior)};
     }
     if(Object.keys(this.state.events).length>=4096) return {code:429,body:{event_id:event.event_id,status:'event_capacity_reached'}};
     let status='queued';
@@ -84,6 +87,7 @@ export class Engine {
     } catch (error) {
       item.status=error instanceof Stop&&error.code==='pickup_task_deadline'?'lock_timeout':error instanceof Stop&&error.code==='pickup_stalled_yield'?'superseded':error instanceof Stop&&error.code==='pickup_unavailable'?'pickup_unavailable':'manual_review';
       item.reason=error instanceof Stop?error.code:error?.name==='TimeoutError'?'timeout':'browser_error';
+      this.stage(item,'execution_error_at',{kind:'execution_error',error_code:error instanceof Stop?error.code:/^[a-z][a-z0-9_]{1,79}$/.test(error?.message||'')?error.message:item.reason});
     }
     // Once stock was found or checkout progressed, never navigate back even if
     // a later error is mislabeled as unavailable. Preserve the user's page.
@@ -145,12 +149,12 @@ export class Engine {
   }
   async watchPaymentFailure(nowMs=Date.now()){
     const item=this.state.events[this.state.active];
-    if(!item||!['awaiting_user','manual_review'].includes(item.status)||(!item.timestamps.apple_pay_sheet_requested_at&&!item.timestamps.payment_observer_armed_at)||this.releasing||this.signaling||!this.browser.inspectPaymentFailure)return false;
+    if(!item||!['awaiting_user','manual_review'].includes(item.status)||(!item.timestamps.apple_pay_sheet_requested_at&&!item.timestamps.payment_observer_armed_at&&!item.timestamps.guest_order_requested_at)||this.releasing||this.signaling||!this.browser.inspectPaymentFailure)return false;
     if(nowMs<(this.nextPaymentPoll||0))return false;
     this.nextPaymentPoll=nowMs+1000;
     let state;try{state=await this.browser.inspectPaymentFailure(item);}catch{return false;}
     if(this.state.active!==item.event_id)return false;
-    if(!item.timestamps.apple_pay_sheet_requested_at&&state.observed===true&&Number.isFinite(Date.parse(state.requested_at))){
+    if(!item.timestamps.guest_order_requested_at&&!item.timestamps.apple_pay_sheet_requested_at&&state.observed===true&&Number.isFinite(Date.parse(state.requested_at))){
       item.timestamps.apple_pay_sheet_requested_at=state.requested_at;
       this.save();this.log(item,'manual_apple_pay_open_observed');this.armPaymentDeadline(item);
       this.onPaymentWindowObserved?.(item.event_id,state.requested_at);
@@ -200,13 +204,13 @@ export class Engine {
     const item=this.state.events[eventId];
     if (!item || this.state.active!==eventId) return false;
     if (['queued','running'].includes(item.status)) throw new Stop('task_still_running');
-    item.reset_at=now(); this.state.active=null;this.save();this.dispatch();return true;
+    item.reset_at=now(); this.state.active=null;this.log(item,'configuration_lock_released');this.save();this.dispatch();return true;
   }
   expireHeld() {
     let changed=false;
     const ttl=Math.min(600,Math.max(1,this.config.held_event_ttl_seconds||180))*1000;
     for(const item of Object.values(this.state.events)) if(item.status==='held'&&Date.now()-Date.parse(item.detected_at)>ttl) {
-      item.status='expired';item.reason='held_event_expired';item.timestamps.finished_at=now();changed=true;
+      item.status='expired';item.reason='held_event_expired';item.timestamps.finished_at=now();this.log(item,'held_event_expired');changed=true;
     }
     if(changed) this.save();
   }

@@ -111,7 +111,7 @@ node --env-file="$HOME/.config/iphone-duo/guest-payment.env" mac_receiver/safari
 
 真实 Safari 本轮验证：使用用户提供的测试卡，Billing Continue 成功到达 `_s=Review`，观察到 Place Your Order，返回 `review_ready_test_stopped`，未提交订单。测试报告 `runtime/guest-checkout/continue-test.json` 不含卡号。旧计时报告只到填表完成；新报告额外提供 `to_review_from_refresh_ms`，计入 Continue 后到 Review 的等待。
 
-## 复用当前 Guest 会话保留的付款信息
+## 历史实验：复用当前 Guest 会话保留的付款信息（已停用）
 
 联系人 Continue 之后同时接受 Billing 或 Review 两种目的地。Apple 已保留本会话付款信息时，会直接到 Review；旧实现只等待 Billing，导致即使已到最终确认页仍报超时。
 
@@ -145,3 +145,55 @@ node --env-file="$HOME/.config/iphone-duo/guest-payment.env" --env-file="$HOME/.
 ```
 
 环境覆盖支持 Guest 实验和共享 Safari / Chrome 取货填写代码。现有生产服务尚未部署这次更改；当前服务仍按其既有配置运行。只编辑 env 文件不会改变已运行服务的进程环境，需要在启动命令加载相应文件并重启才会生效。
+
+## 1TB 生产窗口灰度切换（2026-10-28）
+
+仅 E / Duo1024White 和 F / Duo1024Black 配置 `checkout_method: "guest_credit"`；A–D 继续 `apple_pay`。Guest 待机、session 恢复和到货执行绑定同一 Guest 路径；Guest Billing/Review 页不会被空闲维护退回购物袋。按窗口携带独立 guest_billing，联系人和卡片来自私有 env 文件。
+
+本轮 `guest_auto_place_order: false`，因此真实库存通知也只自动做到 Review，最终下单由用户点击。测试卡仍是用户指定的测试值，不能把到 Review 视为真实付款成功。两次通过本机接收接口发送的 1TB 白/黑模拟信号都正确进入 Guest，自提页刷新并确认无货后结束；没有实际库存，因此本轮没有验证 1TB 的有货到 Review 全链路。共享有货路径此前已用 PickupTest18Pro 跑通。
+
+当前后台进程的原生 Apple Account Cancel 存在辅助功能权限限制：独立 LaunchAgent 探测得到 macOS `-25211`，而交互式工具可完成同一个取消。首次两个窗口已由交互式工具取消提示并准备到 Guest 自提/07094，后台健康检查确认 E/F ready。以后若 Guest session 恢复需要再次经过该原生提示，权限问题未解决前可能需要人工取消；不应宣称已具备完整无人值守重建能力。
+
+部署配置为 `~/Library/Application Support/iPhoneDuo/receiver-safari/receiver.router.local.json`，启动项加载 `~/.config/iphone-duo/guest-payment.env` 和 `pickup-contact.env`。本轮备份保存在仓库的 `runtime/deployment-backups/*-guest-1tb`。
+
+## 当前策略：每轮重新填写卡片（取代上述复用实验）
+
+Apple 会话的付款保存行为不稳定，因此不再以保存状态作为快速完成的依据。联系人之后若直接到 Review，先点击账单 Change 回 Billing；每次从当前进程环境读取卡号、有效期、CVV，清空这三个卡片字段并重新写入、核对。账单地址已有正确值时仍保留，避免重复触发邮编查询。随后点击 Billing Continue，到 Review 后测试停止、生产遵循其显式提交配置。
+
+后台原生提示权限复查：用户授权后，同样 LaunchAgent / Node 启动方式的只读探针已返回 ok=true，不再出现 -25211。辅助功能授权关联可执行程序身份，给通用 Node 的授权范围比专用辅助程序更大；不要把它当作只允许本仓库脚本的授权。
+
+权限授权后真实后台回归报告：`runtime/safari-regression/1793220883533-guest.json`。美东 16:54:52.653 点击 Apple Account Cancel，16:54:53.292 确认关闭，16:54:53.473 点击 Guest。随后填表和信用卡 Continue 到 Review 全部通过，未下单。21 项实验回归测试通过。每轮重填策略已同步到 E/F 使用的部署脚本。
+
+编辑已有付款资料可能进入 `_s=Billing`，首次进入是 `_s=Billing-init`。当前 Guest 脚本两者均接受，并把两者都视为需要保护的付款页面；旧实现只等待 Billing-init 会在编辑返回后超时。新增回归覆盖 Billing 路径的填卡、地址核对和 Continue。
+
+## 当前快速模式：用户预先完成配送付款，再切回自提
+
+用户先完成 Guest 配送地址及付款资料，到 Review 后 Change delivery/shipping method，改为 I’ll pick it up 并设置 07094。库存脚本不做这段预填准备，只从自提页刷新开始。
+
+启用 `guest_payment_prepared: true` 后：刷新 → 首个可用门店 → 日期／第二个有效时间 → 取货联系人回读 → Continue → Review。不会打开 Billing 或填写卡片。若直接到 Review 但需要确认隐藏的邮箱／电话，则通过 pickup contact Change 核对四项，再回 Review；付款摘要保持不变。Review 检查目标配置、数量一、门店、取货人姓名及可见的卡片付款摘要。
+
+若付款资料丢失而进入 Billing，停止为 `prepared_payment_missing_manual_review`；Guest 会话失效时要求人工重新准备，不自动从购物袋重建预填付款。保留原先的“每次重填卡片”作为独立模式，不能混用两条耗时口径。
+
+测试命令：
+
+```sh
+node --env-file="$HOME/.config/iphone-duo/pickup-contact.env" mac_receiver/safari/guest_checkout.mjs --config /absolute/path/test.local.json --run-only --prepared-payment
+```
+
+该命令不读取卡片环境变量，只使用当前会话已准备的付款。测试到 Review 停止，不点 Place Your Order。兼容 Apple 编辑路径的 Fulfillment / PickupContact / Billing 和带 -init 的首次路径，以及预填后缩短为 Continue 的按钮；短按钮仍受门店、日期、时间校验约束。
+
+预填模式三轮成功刷新到 Review：19.158, 5.980, 6.622 秒；平均 10.587 秒，后两轮平均 6.301 秒。三轮 card_fields_written=false，均停在 Place Your Order 之前。报告：runtime/safari-regression/1793222455052-guest.json, runtime/safari-regression/1793222501279-guest.json。此前因编辑路径和短按钮兼容问题失败的尝试未计入成功平均，不能据此承诺固定延迟。
+
+## 生产自动下单授权（最新，2026-10-28）
+
+用户明确授权 1024GB 白／黑两个生产窗口自动点击 Place Your Order，每台含税总额最高 3,000 美元。E/F 配置 guest_payment_prepared=true、guest_auto_place_order=true、guest_max_total_usd=3000；A–D 保持 Apple Pay，测试 CLI 保持 test，禁止下单。
+
+只有目标商品、数量一、可见订单总额不超限、自提门店及取货人核对通过，才允许最终提交。提交标记先持久化，再点击一次，响应不确定不得自动重复提交。返回 order_requested 不等同 Apple 确认订单成功。测试未提交真实订单；生产服务之后收到库存事件时才按此授权执行。
+
+## 六窗口正式配置（2026-10-28 最新）
+
+用户已将六个配置全部预填并切到 Guest 自提。A–F 全部配置 guest_credit、guest_payment_prepared=true、guest_auto_place_order=true、guest_max_total_usd=3000；每次仅一台。收到库存后直接从当前 Guest 自提页刷新执行，不另行确认；测试仍禁止最终提交。
+
+Guest 下单记录绑定 event_id 和 product，先保存再单次点击。后台每秒观察明确错误提示；只有本次提交的明确支付拒绝／下单失败／库存失效，且没有订单成功确认，才清理这次提交标记、作废旧事件、回同一会话的 Fulfillment-init 自提页并解除锁，等待新的库存信号。不为失败事件合成旧库存重试。普通错误、页面不可读、结果不明或订单成功均不自动返回／重下单。Guest 观察器不启动 Apple Pay 的限时返回逻辑。
+
+本次只读检查中 1024 黑为 session_expired，已请求用户重新预填；其余五个均为 Guest Fulfillment/07094。不能把配置已切换等同所有窗口会话均有效。失败恢复及事件归属、成功优先、去重／旧事件退役由模拟页面验证，没有通过真实付款制造失败来测试。

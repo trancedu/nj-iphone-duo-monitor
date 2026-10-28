@@ -6,11 +6,14 @@ export function sanitizeObservation(input={}) {
   return {kind:code(input.kind),attempt:Number.isInteger(input.attempt)?input.attempt:null,phase:code(input.phase),
     backend:input.backend==='safari'?'safari':null,profile:text(input.profile,80),window_id:Number.isInteger(input.window_id)?input.window_id:null,
     requested_store_name:text(input.requested_store_name),requested_store_id:text(input.requested_store_id,40),
-    page:{origin:origin&&/^https:\/\/(?:www\.apple\.com|secure\d*\.store\.apple\.com)$/.test(origin)?origin:null,path:['/shop/apw/checkout','/shop/bag'].includes(path)?path:null,state:['Fulfillment-init','PickupContact-init'].includes(page.state)?page.state:null},
+    page:{origin:origin&&/^https:\/\/(?:www\.apple\.com|secure\d*\.store\.apple\.com)$/.test(origin)?origin:null,path:['/shop/apw/checkout','/shop/checkout','/shop/bag','/shop/signIn'].includes(path)?path:null,state:['Fulfillment','Fulfillment-init','PickupContact','PickupContact-init','Billing','Billing-init','Review','Review-init'].includes(page.state)?page.state:null},
     displayed_zip:/^\d{5}$/.test(input.displayed_zip||'')?input.displayed_zip:null,
     displayed_location:text(input.displayed_location,100),
     configured_zip:/^\d{5}$/.test(input.configured_zip||'')?input.configured_zip:null,
     verdict:code(input.verdict),error_code:code(input.error_code),expansion_available:typeof input.expansion_available==='boolean'?input.expansion_available:null,
+    ...Object.fromEntries(['ready','expired','protected','session_warning','pickup_expiry_confirmed','alreadySelected','order_requested','order_confirmed','response_unknown','payment_prepared','card_fields_written','recoverable','closed','observed'].filter(k=>typeof input[k]==='boolean').map(k=>[k,input[k]])),
+    ...Object.fromEntries(['elapsed_ms','bridge_ms','dom_ms','count','total_ms','max_ms'].filter(k=>Number.isFinite(input[k])&&input[k]>=0).map(k=>[k,Math.round(input[k]*100)/100])),
+    operation:code(input.operation),outcome:code(input.outcome),
     stores:Array.isArray(input.stores)?input.stores.slice(0,40).map(s=>({name:text(s.name),store_id:text(s.store_id,40),availability_text:text(s.availability_text,80),enabled:s.enabled===true,visible:typeof s.visible==='boolean'?s.visible:null})):[]};
 }
 // Dedicated diagnostic history: 10 MiB per file, two older files retained.

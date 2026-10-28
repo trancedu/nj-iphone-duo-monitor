@@ -207,3 +207,9 @@ test('manual retry refuses stale ownership and reports failed restore without st
  const retry=f.router.manualRetry({profile_label:'A',expected_event_id:'white',restore_only:false});await turn();await turn();
  assert.deepEqual(f.calls,['white']);assert.equal(f.slots[0].engine.state.active,null);assert.equal(f.slots[0].engine.state.events[retry.event_id].status,'manual_review');
 });
+test('Guest confirmed failure returns to standby without synthesizing an old-stock retry',async t=>{
+ const f=fixture(t);f.slots[0].browser.config={checkout_method:'guest_credit'};f.router.accept(f.event('guest'));await turn();f.pending.get('guest').ok();await turn();await turn();
+ const e=f.slots[0].engine;e.state.events.guest.timestamps.guest_order_requested_at=new Date().toISOString();
+ f.slots[0].browser.inspectPaymentFailure=async()=>({outcome:'failed',recoverable:true,observed:true,closed:true,phase:'guest_order_failed'});f.slots[0].browser.recoverPaymentFailure=async()=>{};
+ assert.equal(await e.watchPaymentFailure(),true);await delay(140);assert.equal(e.state.active,null);assert.deepEqual(f.calls,['guest']);
+});

@@ -165,7 +165,7 @@ export function safariDOM({op,args={}}) {
       if(args.allow_time_reselect)return {clicked:false,time_reset:true,options:e?Array.from(e.options).map(o=>({value:o.value,label:o.label,disabled:o.disabled})):[]};
       fail('pickup_time_not_selected');
     }}
-    const b=one(buttons().filter(e=>name(e)==='Continue to Pickup Details'));if(!enabled(b))return {clicked:false};window.__duoPickupContinueRequested=true;click(b);return {clicked:true};
+    const b=one(buttons().filter(e=>name(e)==='Continue to Pickup Details'||args.guest_checkout===true&&u.pathname==='/shop/checkout'&&['Fulfillment','Fulfillment-init'].includes(u.searchParams.get('_s'))&&e.id==='rs-checkout-continue-button-bottom'&&name(e)==='Continue'));if(!enabled(b))return {clicked:false};window.__duoPickupContinueRequested=true;click(b);return {clicked:true};
   }
   const finalButton=()=>document.getElementById('co-options-applePay');
   if(op==='detailsReady')return {ready:all('h1,h2').some(e=>norm(e.textContent)==='Now fill out your pickup information.')&&!!finalButton()};
