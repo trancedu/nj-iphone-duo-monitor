@@ -40,11 +40,22 @@ export class SafariPickupBrowser {
       return this.lastResult.status;
     }catch(error){
       if(!(error instanceof Stop&&error.code==='pickup_unavailable')){
-        let diagnostic={};try{diagnostic=await this.window.call('diagnosticState');}catch{}
+        let diagnostic={};try{diagnostic=await this.window.call('diagnosticState',{product:expectedProduct(event.product_url)});}catch{}
         observe('pickup_failure_observed_at',{...diagnostic,kind:'pickup_failure',error_code:error instanceof Stop?error.code:'browser_error'});
+        if(error instanceof Stop&&error.code==='safari_step_timeout'&&diagnostic.pickup_expiry_confirmed===true&&diagnostic.page?.state==='Fulfillment-init'&&diagnostic.displayed_zip===cfg.pickup_zip){
+          observe('pickup_expired_confirmed_at',{...diagnostic,kind:'pickup_failure',error_code:'pickup_expired_after_timeout'});
+          this.lastResult={status:'pickup_expired'};return 'pickup_expired';
+        }
       }
       throw error;
     }
+  }
+  async restoreExpiredPickup(){
+    const d=await this.window.call('diagnosticState',{product:expectedProduct(this.activeProductURL||this.config.preseeded_product_url)});
+    if(d.pickup_expiry_confirmed!==true||d.page?.state!=='Fulfillment-init'||d.displayed_zip!==(process.env.APPLE_PICKUP_ZIP??this.config.pickup_zip))throw new Stop('pickup_expiry_no_longer_confirmed');
+    await this.window.goto('https://www.apple.com/shop/bag');
+    await waitFor(async()=>{const s=await this.window.call('snapshot');return new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete'&&s.bag.length===1&&s.bag[0].title===expectedProduct(this.activeProductURL||this.config.preseeded_product_url)&&s.bag[0].quantity==='1';},this.config.step_timeout_ms||20000);
+    return this.seedIdle();
   }
   async seedIdle(){
     await this.ensurePage();
@@ -143,7 +154,7 @@ export class SafariPickupBrowser {
   }
 
 }
-// A single metadata poll covers all four profiles. Do not treat a Safari quit,
+// A single metadata poll covers all configured profiles. Do not treat a Safari quit,
 // restart, or loss of ALL known windows as the user's per-task close gesture.
 export async function pollSafariSlots(slots,windows){
   const ids=new Set(windows.map(w=>w.id));

@@ -154,3 +154,11 @@ test('incoming signal announcement never delays preparation or repeats a duplica
  let announceDone,announcements=0,prepares=0;const browser={ready:()=>true,onEventStarted:()=>{announcements++;return new Promise(r=>{announceDone=r;});},prepare:async()=>{prepares++;return 'awaiting_user';},handoff:async()=>{}};
  const h=await harness(t,false,browser);h.config.queue_while_busy=true;const first=event();await h.request('/prepare',first);await nextTurn();await nextTurn();assert.equal(prepares,1);assert.equal(h.engine.state.events[first.event_id].status,'awaiting_user');await h.request('/prepare',first);await h.request('/prepare',event('held-signal'));assert.equal(announcements,1);announceDone({audio_queued:true});await nextTurn();
 });
+
+test('confirmed expired inventory after selection restores and releases immediately; uncertain failure keeps lock',async t=>{
+ let restores=0,fail=false;
+ const browser={ready:()=>true,prepare:async(e,stage)=>{stage('store_selected_at');stage('pickup_expired_confirmed_at');return 'pickup_expired';},handoff:async()=>{},restoreExpiredPickup:async()=>{restores++;if(fail)throw Error('stock returned');}};
+ const h=await harness(t,false,browser);h.config.auto_release_unavailable=true;
+ await h.request('/prepare',event());await nextTurn();await nextTurn();assert.equal(restores,1);assert.equal(h.engine.state.active,null);assert.equal(h.engine.state.events['event-one'].status,'pickup_expired');
+ fail=true;await h.request('/prepare',event('changed-stock'));await nextTurn();await nextTurn();assert.equal(h.engine.state.active,'changed-stock');assert.equal(h.engine.state.events['changed-stock'].reason,'standby_restore_failed');
+});

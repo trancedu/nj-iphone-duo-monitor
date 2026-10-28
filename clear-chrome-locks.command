@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Restore the current receiver's four carts and release the global request lock.
+# Restore every profile in the active receiver config and release its global lock.
 cd -- "${0:A:h}" || exit 1
 python3 deploy/clear_receiver_locks.py
 result=$?

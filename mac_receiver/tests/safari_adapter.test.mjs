@@ -69,3 +69,19 @@ test('Safari adapter forwards event store identity with observations and handoff
 test('configuration is announced on signal start and final handoff skips duplicate audio',async()=>{
  const f=fixture();await f.b.start();const calls=[];f.b.signal=async(w,r,c)=>{calls.push({r,c});return {audio_queued:true};};const e={event_id:'signal-test',product_url:url};f.b.activeTaskId=e.event_id;await f.b.onEventStarted(e);await f.b.handoff('awaiting_user');assert.equal(calls[0].r.status,'inventory_signal');assert.equal(calls[1].c.mute_audio,true);
 });
+
+test('timeout becomes expired only with confirmed unavailable fulfillment and correct ZIP',async()=>{
+ const {Stop}=await import('../protocol.mjs');
+ for(const invalid of [null,'unconfirmed','contact','zip','other-error']){
+  const f=fixture({pickup_zip:'07094'});await f.b.start();f.b.ensurePage=async()=>{};
+  f.b.window.call=async()=>({pickup_expiry_confirmed:invalid!=='unconfirmed',page:{state:invalid==='contact'?'PickupContact-init':'Fulfillment-init'},displayed_zip:invalid==='zip'?'00000':'07094'});
+  f.b.workflow=async()=>{throw new Stop(invalid==='other-error'?'pickup_time_not_selected':'safari_step_timeout');};
+  if(invalid)await assert.rejects(()=>f.b.prepare({product_url:url},()=>{}));
+  else assert.equal(await f.b.prepare({product_url:url},()=>{}),'pickup_expired');
+ }
+});
+test('expired pickup restore rechecks inventory before touching page',async()=>{
+ const f=fixture({pickup_zip:'07094'});await f.b.start();let navigated=0;
+ f.b.window.call=async()=>({pickup_expiry_confirmed:false});f.b.window.goto=async()=>navigated++;
+ await assert.rejects(()=>f.b.restoreExpiredPickup(),e=>e.code==='pickup_expiry_no_longer_confirmed');assert.equal(navigated,0);
+});

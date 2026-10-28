@@ -21,10 +21,10 @@ test('production handoff returns while voice is still pending',async()=>{
  assert.equal(r.audio_queued,true);assert.equal(r.notification_submitted,true);assert.equal(r.sound_played,undefined);await turn();finish({sound_played:true});await queue.idle();
 });
 test('unavailable feedback and checkout outcome are independent of queue failure',async()=>{
- let bells=0;const result={status:'pickup_unavailable'};const r=await signalSafari(null,result,{},{audioQueue:{submit:()=>({audio_queued:false})},notify:async()=>{},bell:()=>{bells++;}});assert.equal(r.audio_queued,false);assert.equal(bells,1);assert.equal(result.status,'pickup_unavailable');
+ let bells=0;const result={status:'pickup_unavailable'};const r=await signalSafari(null,result,{},{audioQueue:{submit:()=>({audio_queued:false})},notify:async()=>{},bell:()=>{bells++;}});assert.equal(r.audio_queued,false);assert.equal(bells,0);assert.equal(result.status,'pickup_unavailable');
 });
-test('speech is only capacity and color for each production Duo configuration',()=>{
- for(const [capacity,color,expected] of [['256GB','Star White','二五六白'],['256GB','Night Sky','二五六黑'],['512GB','Star White','五一二白'],['512GB','Night Sky','五一二黑']])assert.equal(feedbackPlan({status:'awaiting_user'},{product:`iPhone Duo ${capacity} ${color}`}).speech,expected);
+test('completion includes capacity, color and the requested Chinese action',()=>{
+ for(const [capacity,color,expected] of [['256GB','Star White','二五六白'],['256GB','Night Sky','二五六黑'],['512GB','Star White','五一二白'],['512GB','Night Sky','五一二黑']])assert.equal(feedbackPlan({status:'awaiting_user'},{product:`iPhone Duo ${capacity} ${color}`}).speech,expected+'，已准备好，请手动确认付款');
 });
 test('inventory signal speaks configuration before checkout is ready; final notice can skip audio',async()=>{
  const p=feedbackPlan({status:'inventory_signal'},{product:'iPhone Duo 512GB Star White'});assert.equal(p.speech,'五一二白');assert.equal(p.repetitions,0);assert.ok(p.message.includes('正在核验'));

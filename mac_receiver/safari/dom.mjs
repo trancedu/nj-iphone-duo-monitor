@@ -104,7 +104,8 @@ export function safariDOM({op,args={}}) {
     const zip=all('input[role="combobox"]').find(e=>name(e)==='Zip Code or City, State');
     const zipButton=buttons().map(name).find(s=>/^\d{5}(?:\s|$)/.test(s));
     const rawZip=zip?.value||zipButton?.match(/^\d{5}/)?.[0]||null;
-    return {page:{origin:u.origin,path:u.pathname,state:u.searchParams.get('_s')},displayed_zip:/^\d{5}$/.test(rawZip||'')?rawZip:null,no_availability:noAvailability(),
+    const pickup_expiry_confirmed=typeof args.product==='string'&&norm(document.body?.textContent).includes(args.product)&&all('h1,h2').some(e=>visible(e)&&/How would you like to get your order\?/i.test(norm(e.textContent)))&&!!storeList()&&visible(storeList())&&stores().length>0&&stores().every(e=>!enabled(e)&&/Currently unavailable|Unavailable for pickup|Not available/i.test(name(e)))&&!window.__duoApplePayRequested&&!document.getElementById('co-options-applePay')&&!all('img,[aria-busy="true"],[role="progressbar"]').some(e=>visible(e)&&(e.tagName!=='IMG'||name(e)==='Processing'));
+    return {pickup_expiry_confirmed,page:{origin:u.origin,path:u.pathname,state:u.searchParams.get('_s')},displayed_zip:/^\d{5}$/.test(rawZip||'')?rawZip:null,no_availability:noAvailability(),
       stores:stores().map(e=>{const label=name(e);return {name:label,enabled:enabled(e),visible:visible(Array.from(e.labels||[]).find(visible)||e),store_id:((e.id+' '+e.value).match(/\bR\d{3,4}\b/)||[])[0]||null,availability_text:(label.match(/Currently unavailable|Unavailable for pickup|Not available|unavailable|Available Today|Available Tomorrow|Available for pickup/i)||[])[0]||null};})};
   }
   if(op==='moreStores') {if(noAvailability())return {expanded:false,noAvailability:true};const root=storeList();const b=root?all('button,[role="button"],a',root).filter(e=>visible(e)&&/^Show more stores\b/.test(name(e))):[];if(b.length!==1)return {expanded:false};click(b[0]);return {expanded:true};}

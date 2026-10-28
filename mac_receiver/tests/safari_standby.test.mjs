@@ -235,3 +235,22 @@ test('warm reload retries arming when fulfillment DOM is temporarily incomplete'
  assert.equal((await prepareSafariStandby(f.window,url,cfg,{refresh:true})).status,'standby_checkout');
  assert.ok(attempts>=2);
 });
+
+test('unavailable retry re-arms standby when Apple restores a default store selection',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);const reload=f.window.reload;
+ f.window.reload=async()=>{await reload();await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>e.checked=true);};
+ assert.equal((await prepareSafari(f.window,url,{...cfg,pickup_unavailable_retries:1})).status,'pickup_unavailable');
+ assert.equal((await prepareSafariStandby(f.window,url,cfg)).status,'standby_checkout');
+});
+
+test('expiry confirmation requires settled unavailable inventory for matching product and no wallet',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ const read=()=>f.window.call('diagnosticState',{product});
+ assert.equal((await read()).pickup_expiry_confirmed,true);
+ assert.equal((await f.window.call('diagnosticState',{product:'Wrong Product'})).pickup_expiry_confirmed,false);
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>e.disabled=false);
+ assert.equal((await read()).pickup_expiry_confirmed,false);
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>e.disabled=true);
+ await f.page.evaluate(()=>window.__duoApplePayRequested=true);
+ assert.equal((await read()).pickup_expiry_confirmed,false);
+});

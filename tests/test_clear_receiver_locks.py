@@ -122,5 +122,104 @@ class AutomaticCleanupTests(unittest.TestCase):
         self.exercise(hard=True, restore_ok=False)
 
 
+class SixWindowCleanupTests(unittest.TestCase):
+    def test_manual_cleanup_cancels_all_six_including_one_tb_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp);root=home/'receiver';root.mkdir()
+            node=home/'node';node.touch();gate=root/'gate';gate.mkdir()
+            (gate/'global-lock.json').write_text(json.dumps({'event_id':'active-F'}))
+            slots=[]
+            for label in 'ABCDEF':
+                folder=root/label;folder.mkdir()
+                (folder/'events.json').write_text(json.dumps({'active':'active-'+label,'events':{
+                    'active-'+label:{'status':'running','timestamps':{}},
+                    'waiting-'+label:{'status':'global_waiting','timestamps':{}}}}))
+                slots.append({'label':label,'state_dir':str(folder)})
+            config=root/'receiver.router.local.json'
+            config.write_text(json.dumps({'slots':slots,'state_dir':str(gate),'standby_page':'pickup_checkout','pickup_zip':'07094'}))
+            plist=home/'Library/LaunchAgents/com.trancedu.apple-pickup-router.plist';plist.parent.mkdir(parents=True)
+            plist.write_bytes(plistlib.dumps({'ProgramArguments':[str(node),'--config',str(config)]}))
+            running=False
+            def run(argv,**kwargs):
+                nonlocal running
+                if argv[:2]==['launchctl','kill']:running=False
+                if argv[:2]==['launchctl','kickstart']:running=True
+                if argv[:2]==['launchctl','print']:return subprocess.CompletedProcess(argv,0,'state = running' if running else '', '')
+                if argv[0]==str(node):
+                    self.assertEqual(kwargs['timeout'],450)
+                    return subprocess.CompletedProcess(argv,0,json.dumps([{'slot':s['label'],'restored':True} for s in slots]),'')
+                return subprocess.CompletedProcess(argv,0,'','')
+            output=io.StringIO()
+            with patch.object(cleaner.Path,'home',return_value=home),patch.object(cleaner.subprocess,'run',side_effect=run),patch.object(cleaner.sys,'argv',['clear']),contextlib.redirect_stdout(output):
+                self.assertEqual(cleaner.main(),0)
+            for slot in slots:
+                state=json.loads((Path(slot['state_dir'])/'events.json').read_text())
+                self.assertIsNone(state['active'])
+                self.assertEqual(state['events']['waiting-'+slot['label']]['status'],'expired')
+                self.assertEqual(state['events']['active-'+slot['label']]['status'],'interrupted')
+            self.assertIsNone(json.loads((gate/'global-lock.json').read_text())['event_id'])
+            self.assertTrue(running)
+            self.assertIn('全部 6 个窗口（A、B、C、D、E、F）',output.getvalue())
+            self.assertIn('6/6',output.getvalue())
+
+
+class RestoreDestinationTests(unittest.TestCase):
+    def test_node_restore_requires_verified_pickup_and_zip_for_every_slot(self):
+        import shutil
+        node=shutil.which('node')
+        if not node:self.skipTest('node unavailable')
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'safari').mkdir()
+            slots=[{'label':label,'safari_profile':'Profile'+label,'product_url':'url-'+label} for label in 'ABCDEF']
+            cfg={'browser_backend':'safari','standby_page':'pickup_checkout','pickup_zip':'07094','slots':slots}
+            (root/'receiver.router.local.json').write_text(json.dumps(cfg))
+            (root/'protocol.mjs').write_text('export const expectedProduct=url=>url;')
+            (root/'safari/shopping.mjs').write_text("""
+import {readFileSync,appendFileSync} from 'node:fs';
+const root=process.argv[1];
+const cfg=JSON.parse(readFileSync(root+'/receiver.router.local.json'));
+export const listSafariWindows=async()=>cfg.slots.map((s,i)=>({id:i,name:s.safari_profile+' — Bag',tabs:1}));
+export const waitFor=async fn=>{const value=await fn();if(!value)throw Error('not_ready');return value;};
+export class SafariWindow{
+ constructor(id){this.id=id;this.pickup=(cfg.initialReady||[]).includes(id);}
+ async goto(){appendFileSync(root+'/navigated',String(this.id)+'\\n');this.pickup=false;}
+ async call(op){
+  if(op==='snapshot')return {url:'https://www.apple.com/shop/bag',ready:'complete',bag:[{title:cfg.slots[this.id].product_url,quantity:'1'}]};
+  if(op==='standbyState')return {ready:this.pickup,matching_product:true,checkout:true,pickup_ready:this.pickup,protected:false,expired:false,pickup_selected:this.pickup};
+  if(op==='locationState')return {displayed_zip:cfg.badZip&&this.id===5?'00000':'07094'};
+ }
+}
+export const prepareSafariStandby=async(w,url,config)=>{
+ if(config.open_apple_pay_sheet!==false)throw Error('payment_not_disabled');
+ w.pickup=true;appendFileSync(root+'/prepared',url+'\\n');return {status:'standby_checkout'};
+};
+""")
+            run=lambda:subprocess.run([node,'--input-type=module','-e',cleaner.RESTORE,str(root)],capture_output=True,text=True,check=True)
+            rows=json.loads(run().stdout)
+            self.assertEqual(len(rows),6)
+            self.assertTrue(all(r['restored'] and r['page']=='pickup_checkout' and r['zip']=='07094' for r in rows))
+            cfg['badZip']=True;(root/'receiver.router.local.json').write_text(json.dumps(cfg))
+            rows=json.loads(run().stdout)
+            self.assertTrue(all(r['restored'] for r in rows[:5]))
+            self.assertFalse(rows[5]['restored'])
+            self.assertEqual(rows[5]['reason'],'pickup_standby_not_verified')
+            # Five ready pages are never navigated or passed through checkout again.
+            cfg.pop('badZip');cfg['initialReady']=[0,1,2,3,4]
+            (root/'receiver.router.local.json').write_text(json.dumps(cfg))
+            (root/'navigated').unlink();(root/'prepared').unlink()
+            rows=json.loads(run().stdout)
+            self.assertTrue(all(r.get('unchanged') for r in rows[:5]))
+            self.assertFalse(rows[5].get('unchanged',False))
+            self.assertEqual((root/'navigated').read_text().splitlines(),['5'])
+            self.assertEqual((root/'prepared').read_text().splitlines(),['url-F'])
+            # When all six are ready, the restore must perform zero navigations/checkouts.
+            cfg['initialReady']=list(range(6));(root/'receiver.router.local.json').write_text(json.dumps(cfg))
+            (root/'navigated').unlink();(root/'prepared').unlink()
+            rows=json.loads(run().stdout)
+            self.assertTrue(all(r.get('unchanged') for r in rows))
+            self.assertFalse((root/'navigated').exists());self.assertFalse((root/'prepared').exists())
+
+
+
 if __name__ == '__main__':
     unittest.main()

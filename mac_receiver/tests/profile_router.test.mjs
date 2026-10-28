@@ -213,3 +213,19 @@ test('strict first arrival drops busy events permanently even with old candidate
   assert.equal(h.router.accept(event('new-after-free',DUO_VARIANTS[2])).code,202);
   await nextTurn();await nextTurn();assert.deepEqual(h.calls.map(c=>c.label),['A','C']);
 });
+
+test('six profiles route 1TB colors independently and keep the shared global gate',async t=>{
+ const h=harness(t,true);
+ for(const [label,color] of [['E','star-white'],['F','night-sky']]){
+  const url=`https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-1tb-${color}-unlocked`;
+  const browser={ready:()=>true,prepare:async e=>{h.calls.push({label,url:e.product_url});return 'awaiting_user';},handoff:async()=>{}};
+  h.slots.push({label,product_url:url,browser,engine:new Engine({state_dir:join(h.config.state_dir,label),dry_run:false,queue_while_busy:false},browser)});
+ }
+ assert.equal(h.router.accept(event('one-t-white',h.slots[4].product_url)).body.profile_label,'E');
+ await nextTurn();await nextTurn();
+ h.router.accept(event('one-t-black',h.slots[5].product_url));await nextTurn();
+ assert.deepEqual(h.calls.map(c=>c.label),['E']);
+ h.slots[4].engine.reset('one-t-white');await h.router.reset('one-t-white');
+ assert.equal(h.router.accept(event('one-t-black-new',h.slots[5].product_url)).body.profile_label,'F');
+ await nextTurn();await nextTurn();assert.deepEqual(h.calls.map(c=>c.label),['E','F']);
+});

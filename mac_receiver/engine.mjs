@@ -79,6 +79,7 @@ export class Engine {
     try {
       const result=await this.browser.prepare(item,(name,detail)=>this.stage(item,name,detail));
       item.status=result||'awaiting_user';
+      if(item.status==='pickup_expired')item.reason='pickup_expired_after_timeout';
     } catch (error) {
       item.status=error instanceof Stop&&error.code==='pickup_unavailable'?'pickup_unavailable':'manual_review';
       item.reason=error instanceof Stop?error.code:error?.name==='TimeoutError'?'timeout':'browser_error';
@@ -92,10 +93,13 @@ export class Engine {
     try { const feedback=await this.browser.handoff(item.status,item.reason);if(feedback){item.feedback=feedback;this.stage(item,feedback.audio_queued!==undefined?'feedback_dispatched_at':'feedback_completed_at');} }
     catch { item.reason=item.reason||'attention_signal_failed';this.save();this.log(item,'attention_signal_failed'); }
     finally {this.signaling=false;}
-    if(item.status==='pickup_unavailable'&&this.config.auto_release_unavailable) {
+    if(['pickup_unavailable','pickup_expired'].includes(item.status)&&this.config.auto_release_unavailable) {
       this.releasing=true;
       try {
-        await this.browser.seedIdle();
+        if(item.status==='pickup_expired'){
+          if(!this.browser.restoreExpiredPickup)throw new Stop('expiry_restore_unsupported');
+          await this.browser.restoreExpiredPickup();
+        }else await this.browser.seedIdle();
         item.release_reason='pickup_unavailable_return_to_standby';this.reset(item.event_id,true);
       } catch {item.reason='standby_restore_failed';this.save();this.log(item,'standby_restore_failed');}
       finally {this.releasing=false;}

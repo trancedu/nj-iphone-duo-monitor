@@ -142,6 +142,7 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     await wait(async()=>(await call('pickup')).ready);
     let ready=await wait(async()=>{const s=await call('pickupReady');return s.ready||s.zipNeeded?s:null;});
     if(ready.zipNeeded){await call('zip',{zip:config.pickup_zip});await wait(async()=>(await call('pickupReady')).ready);}
+    if(config.standby_page==='pickup_checkout')await wait(async()=>{const s=await call('armPickupStandby');return s.armed?s:null;});
   };
   if(!warm){await openPickup();stage('pickup_page_ready_at');}
   const retries=config.pickup_unavailable_retries??2,interval=config.pickup_retry_interval_ms??1000;

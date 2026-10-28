@@ -195,7 +195,7 @@ export async function main() {
   const i=process.argv.indexOf('--config');if(i<0||!process.argv[i+1])throw new Stop('config_required');
   const file=resolve(process.argv[i+1]),cfg=JSON.parse(readFileSync(file));const root=dirname(file);
   cfg.state_dir=resolve(root,cfg.state_dir);
-  if(!privateIPv4(cfg.host)||!Number.isInteger(cfg.port)||cfg.port<1024||cfg.port>65535||!Array.isArray(cfg.allowed_sources)||!cfg.allowed_sources.length||cfg.allowed_sources.some(s=>!privateIPv4(s))||typeof cfg.dry_run!=='boolean'||!Array.isArray(cfg.slots)||cfg.slots.length!==4||!cfg.selectors?.bag_item||!cfg.selectors?.store_list||!cfg.selectors?.store_row)throw new Stop('invalid_router_config');
+  if(!privateIPv4(cfg.host)||!Number.isInteger(cfg.port)||cfg.port<1024||cfg.port>65535||!Array.isArray(cfg.allowed_sources)||!cfg.allowed_sources.length||cfg.allowed_sources.some(s=>!privateIPv4(s))||typeof cfg.dry_run!=='boolean'||!Array.isArray(cfg.slots)||(cfg.slots.length<1||cfg.slots.length>6)||!cfg.selectors?.bag_item||!cfg.selectors?.store_list||!cfg.selectors?.store_row)throw new Stop('invalid_router_config');
   if(!cfg.dry_run&&cfg.selectors_verified!==true)throw new Stop('verify_selectors_before_live');
   const secret=process.env[cfg.secret_env||'PICKUP_SHARED_SECRET'];if(!secret||secret.length<32)throw new Stop('secret_too_short');
   if(cfg.handoff_idle_timeout_seconds!==undefined&&(!Number.isInteger(cfg.handoff_idle_timeout_seconds)||cfg.handoff_idle_timeout_seconds<0||cfg.handoff_idle_timeout_seconds>86400))throw new Stop('invalid_handoff_idle_timeout');
@@ -228,7 +228,7 @@ export async function main() {
       productURL(s.product_url);for(const u of s.aliases||[])productURL(u);
       const state_dir=resolve(root,s.state_dir);
       const endpoint=cfg.browser_backend==='safari'?s.safari_profile:s.cdp_endpoint;
-      if(!endpoint||!/^[A-D]$/.test(s.label)||labels.has(s.label)||endpoints.has(endpoint)||states.has(state_dir))throw new Stop('duplicate_profile_slot');
+      if(!endpoint||!/^[A-F]$/.test(s.label)||labels.has(s.label)||endpoints.has(endpoint)||states.has(state_dir))throw new Stop('duplicate_profile_slot');
       labels.add(s.label);endpoints.add(endpoint);states.add(state_dir);lock(state_dir);
       const c={...cfg,slots:undefined,profile_label:s.label,preseeded_product_url:s.product_url,preseed_on_release:true,warm_product_pages:false,cdp_endpoint:s.cdp_endpoint,safari_profile:s.safari_profile,state_dir};
       if(cfg.single_active_request)Object.assign(c,{queue_while_busy:false,queue_when_browser_not_ready:false,auto_release_unavailable:cfg.release_global_on_unavailable===true,release_on_task_tab_close:false,handoff_idle_timeout_seconds:0,idle_bag_refresh_interval_seconds:0});

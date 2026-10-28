@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cancel old requests, restore the active backend's bags, unlock and resume."""
+"""Cancel old requests, restore verified pickup standby pages, unlock and resume."""
 import datetime as dt
 import argparse
 import fcntl
@@ -35,7 +35,7 @@ RESTORE = r'''
 import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
 const root=process.argv[1];
-const {SafariWindow,listSafariWindows,waitFor}=await import(pathToFileURL(root+'/safari/shopping.mjs'));
+const {SafariWindow,listSafariWindows,waitFor,prepareSafariStandby}=await import(pathToFileURL(root+'/safari/shopping.mjs'));
 const {expectedProduct}=await import(pathToFileURL(root+'/protocol.mjs'));
 const cfg=JSON.parse(readFileSync(root+'/receiver.router.local.json'));
 const onlySlot=process.argv[2]||null;
@@ -54,13 +54,30 @@ for(const slot of cfg.slots){
     const matches=windows.filter(w=>w.name.startsWith(slot.safari_profile+' — '));
     if(matches.length!==1||matches[0].tabs!==1)throw Error('profile_window_missing_or_ambiguous');
     const window=new SafariWindow(matches[0].id,slot.safari_profile);
+    if(cfg.standby_page==='pickup_checkout'){
+      const state=await window.call('standbyState',{product:expectedProduct(slot.product_url)});
+      if(state.ready&&state.matching_product&&state.checkout&&state.pickup_ready&&state.pickup_selected&&!state.protected&&!state.expired&&!state.session_warning){
+        const location=await window.call('locationState');
+        if(location.displayed_zip===cfg.pickup_zip){
+          results.push({slot:slot.label,restored:true,unchanged:true,page:'pickup_checkout',zip:location.displayed_zip});
+          continue; // Verified standby: no navigation, reload, click or form write.
+        }
+      }
+    }
     await window.goto('https://www.apple.com/shop/bag');
     const snapshot=await waitFor(async()=>{
       const s=await window.call('snapshot');
       return new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete'&&(s.bag.length||s.empty)?s:null;
     },15000,500);
     if(snapshot.bag.length!==1||snapshot.bag[0].title!==expectedProduct(slot.product_url)||snapshot.bag[0].quantity!=='1')throw Error('bag_not_exactly_one_target');
-    results.push({slot:slot.label,restored:true});
+    if(cfg.standby_page==='pickup_checkout'){
+      const config={...cfg,slots:undefined,safari_profile:slot.safari_profile,preseeded_product_url:slot.product_url,open_apple_pay_sheet:false};
+      const prepared=await prepareSafariStandby(window,slot.product_url,config);
+      const state=await window.call('standbyState',{product:expectedProduct(slot.product_url)});
+      const location=await window.call('locationState');
+      if(prepared.status!=='standby_checkout'||!state.ready||state.protected||state.expired||!state.pickup_selected||location.displayed_zip!==cfg.pickup_zip)throw Error('pickup_standby_not_verified');
+      results.push({slot:slot.label,restored:true,page:'pickup_checkout',zip:location.displayed_zip});
+    }else results.push({slot:slot.label,restored:true,page:'bag'});
   }catch(e){results.push({slot:slot.label,restored:false,reason:e.code||e.message||'restore_failed'});}
 }
 console.log(JSON.stringify(results));
@@ -159,13 +176,14 @@ def main():
         node = next((a for a in argv if Path(a).name in ('node', 'nodejs') and Path(a).is_file()), None) or shutil.which('node')
         if not node:
             raise RuntimeError('node_not_found_receiver_left_stopped')
-        print('返回超时 Profile 的购物袋……' if args.expired_event else '返回四个 Profile 的购物袋；不加购、不付款……', flush=True)
+        total_profiles = len(cfg['slots'])
+        print('恢复超时 Profile……' if args.expired_event else f'检查全部 {total_profiles} 个窗口（' + '、'.join(entry['label'] for entry in cfg['slots']) + '）；仅修复未就绪页面，不加购、不付款……', flush=True)
         if args.expired_event and owner_slot is None:
             restored = []  # An orphaned reservation has no browser task to restore.
         else:
             try:
                 result = subprocess.run([node, '--input-type=module', '-e', RESTORE, str(ROOT), owner_slot or ''],
-                                        capture_output=True, text=True, timeout=30 if args.expired_event else 90)
+                                        capture_output=True, text=True, timeout=75 if args.expired_event else max(90, 75 * total_profiles))
                 if result.returncode:
                     raise RuntimeError('bag_restore_failed_receiver_left_stopped')
                 restored = json.loads(result.stdout.strip().splitlines()[-1])
@@ -209,7 +227,12 @@ def main():
         else:
             raise RuntimeError('receiver_not_running_check_profile_windows')
         print(f'完成：取消 {cancelled} 个未完成请求，清除 {count} 个锁。')
-        print(f"购物袋恢复 {len(restored)-len(failures)}/{len(restored)}；接收进程已恢复。")
+        destination = "自提待机页" if cfg.get("standby_page") == "pickup_checkout" else "购物袋"
+        unchanged = sum(bool(row.get("unchanged")) for row in restored)
+        repaired = sum(bool(row.get("restored")) and not row.get("unchanged") for row in restored)
+        print(f"{destination}就绪 {len(restored)-len(failures)}/{len(restored)}：保持原样 {unchanged} 个，修复 {repaired} 个；接收进程已恢复。")
+        if cfg.get('standby_page') == 'pickup_checkout' and not failures:
+            print(f"已验证 I’ll pick it up 和邮编 {cfg.get('pickup_zip', '未配置')}；未选门店、未付款。")
         return 1 if failures else 0
 
 
