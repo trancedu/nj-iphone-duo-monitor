@@ -66,3 +66,11 @@
 另修复启动绑定：Guest自动恢复模式用受限的Apple页面状态读取绑定窗口，允许从Sign In开始恢复；不能先调用会拒绝Sign In的普通snapshot，导致整个接收服务启动失败。
 
 交互式准备通过router state_dir的 `setup-leases/<配置>.json` 临时暂停对应配置的调度和维护，其他配置继续。租约属于实际工作进程PID，结束后移除；PID已退出的残留租约自动清理。此操作不授权重试未决付款。配置C/D通过共用准备函数恢复到Guest Pickup/07094，未提交订单。
+
+## 全屏/分屏桌面空间中的系统弹窗
+
+真实发现：512黑的DOM已经在Guest Pickup/07094，但Apple Account登录sheet仍存在。Safari脚本窗口列表能列出其他桌面空间的窗口，辅助功能窗口列表却可能只列出当前空间；旧实现将目标窗口未出现错误地判断为absent。
+
+修复：在会话准备阶段，通过Safari的Window菜单唯一匹配profile并选择，等待桌面空间切换；同时检查目标窗口sheet和独立原生对话框。必须同时匹配Sign in、store.apple.com、Account、Use a different Account、Cancel才能取消。目标尚未可见返回target_window_not_visible，绝不声称没有弹窗；未知系统对话框不盲点、不发送全局ESC。
+
+Guest切入后，配送/付款准备结束、回到Pickup/07094时再做一次原生登录弹窗检查。仅在会话准备/恢复阶段切换目标窗口，不把这一步加进库存通知的刷新与下单关键路径。

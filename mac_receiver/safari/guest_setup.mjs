@@ -112,5 +112,6 @@ export async function prepareGuestPaymentSession(window,url,config,{allowRepleni
  await window.call('armPickupStandby',{product,explicit_test_reset:true});
  await prepareGuestStandby(window,url,{...config,guest_payment_prepared:true,urgent_same_configuration_retry:false},{stage});
  if((await window.call('locationState')).displayed_zip!==config.pickup_zip)throw Error('setup_pickup_zip_not_verified');
+ await cancelGuestSignIn(window,stage,{allowPickup:true});
  stage('setup_guest_pickup_verified_at');return {status:'standby_checkout',payment_submitted:false};
 }

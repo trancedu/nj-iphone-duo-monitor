@@ -207,3 +207,9 @@ test('989 CVV encoding restores leading zeroes and supports negative stored valu
  for(const cvv of ['000','007','123','989','990','999'])assert.equal(decodeGuestCVV(String(989-Number(cvv)),'subtract_989'),cvv);
  for(const value of ['990','-11','NaN','1.5'])assert.throws(()=>decodeGuestCVV(value,'subtract_989'),/invalid_guest_cvv_encoding/);
 });
+
+test('a hidden full-screen target never counts as absence of an account dialog',async()=>{
+ const {cancelGuestSignIn}=await import('../safari/guest_checkout.mjs');let clock=0,cancels=0;
+ await assert.rejects(()=>cancelGuestSignIn({},()=>{},{now:()=>clock,pause:async ms=>clock+=ms,probe:async cancel=>{if(cancel)cancels++;return 'target_window_not_visible';}}),/guest_target_window_not_visible/);
+ assert.equal(cancels,0);assert.ok(clock>=4000);
+});

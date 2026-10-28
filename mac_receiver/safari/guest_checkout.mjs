@@ -244,58 +244,93 @@ export async function runGuestDOM(window,op,args={}){
  if(op==='state')window.onGuestState?.({path:result.path,state:result.step});
  return result;
 }
-// Native Apple Account prompt is outside the web DOM. Only inspect sheets
-// attached to the exact isolated test profile and never send a global Escape.
-export function guestAccountPromptScript(profile,{cancel=false}={}){
+// Native prompts can be hidden in another full-screen Space. Select the exact
+// Safari Window-menu entry before inspecting attached sheets or root dialogs.
+export function guestAccountPromptScript(profile,{cancel=false,selectWindow=false}={}){
  if(profile!=='PickupTest18Pro'&&!/^Duo(?:256|512|1024)(?:White|Black)$/.test(profile))throw Error('isolated_guest_profile_required');
  const quoted=JSON.stringify(profile+' — ');
- return `tell application "System Events"
+ return `${selectWindow?'tell application "Safari" to activate\n':''}tell application "System Events"
  tell process "Safari"
+  ${selectWindow?`click menu bar item "Window" of menu bar 1
+  set targets to menu items of menu 1 of menu bar item "Window" of menu bar 1 whose name starts with ${quoted}
+  if (count of targets) is not 1 then return "target_window_not_visible"
+  click item 1 of targets
+  delay 0.15`:''}
+  set candidates to {}
+  set targetVisible to false
   repeat with w in windows
-   if name of w starts with ${quoted} then
-    repeat with s in sheets of w
-     set isAccountPrompt to false
-     set hasDifferentAccount to false
-     set cancelControl to missing value
-     set elementsToInspect to entire contents of s
-     repeat with e in elementsToInspect
+   try
+    if name of w starts with ${quoted} then
+     set targetVisible to true
+     repeat with s in sheets of w
+      set end of candidates to contents of s
+     end repeat
+    end if
+    if (subrole of w as text) is "AXDialog" or (role of w as text) is "AXSheet" then
+     set sharingControl to false
+     repeat with b in buttons of w
       try
-       set elementRole to role of e as text
-       if elementRole is "AXStaticText" then
-        set v to value of e as text
-        if v contains "store.apple.com" and v contains "Account" then set isAccountPrompt to true
-       end if
-       if elementRole is "AXButton" then
-        if name of e is "Cancel" then set cancelControl to e
-        if name of e contains "different" and name of e contains "Account" then set hasDifferentAccount to true
-       end if
+       if name of b is "WindowSharingSessionButton" then set sharingControl to true
       end try
      end repeat
-     if isAccountPrompt and hasDifferentAccount and cancelControl is not missing value then
-      ${cancel?'click cancelControl\n      return "cancelled"':'return "present"'}
+     if not sharingControl then set end of candidates to contents of w
+    end if
+   end try
+  end repeat
+  set matchedControls to {}
+  set unknownDialog to false
+  repeat with s in candidates
+   set isAccountPrompt to false
+   set hasDifferentAccount to false
+   set cancelControl to missing value
+   set elementsToInspect to entire contents of s
+   repeat with e in elementsToInspect
+    try
+     set elementRole to role of e as text
+     if elementRole is "AXStaticText" then
+      set v to value of e as text
+      if v contains "store.apple.com" and v contains "Account" and v contains "Sign in" then set isAccountPrompt to true
      end if
-     return "unknown_sheet"
-    end repeat
+     if elementRole is "AXButton" then
+      if name of e is "Cancel" then set cancelControl to e
+      if name of e contains "different" and name of e contains "Account" then set hasDifferentAccount to true
+     end if
+    end try
+   end repeat
+   if isAccountPrompt and hasDifferentAccount and cancelControl is not missing value then
+    set end of matchedControls to contents of cancelControl
+   else
+    set unknownDialog to true
    end if
   end repeat
+  if (count of matchedControls) is 1 then
+   ${cancel?'click item 1 of matchedControls\n   return "cancelled"':'return "present"'}
+  end if
+  if (count of matchedControls) > 1 or unknownDialog then return "unknown_sheet"
+  if not targetVisible then return "target_window_not_visible"
   return "absent"
  end tell
 end tell`;
 }
 export async function cancelGuestSignIn(window,stage=()=>{},options={}){
  const now=options.now||Date.now,pause=options.pause||(ms=>new Promise(r=>setTimeout(r,ms)));
+ let needsWindowSelection=true;
  const probe=options.probe||(async cancel=>{
   // Validate the bound Safari window and route before touching native UI.
   const state=await runGuestDOM(window,'state');
-  if(state.path!=='/shop/signIn')throw Error('native_cancel_requires_guest_signin');
-  return appleScript(guestAccountPromptScript(window.profile,{cancel}));
+  if(state.path!=='/shop/signIn'&&!(options.allowPickup&&state.path==='/shop/checkout'&&['Fulfillment','Fulfillment-init'].includes(state.step)))throw Error('native_cancel_requires_guest_signin');
+  const selectWindow=!cancel&&needsWindowSelection;
+  const status=await appleScript(guestAccountPromptScript(window.profile,{cancel,selectWindow}));
+  if(selectWindow)needsWindowSelection=false;
+  if(cancel&&status==='cancelled')needsWindowSelection=true;
+  return status;
  });
  const started=now();let cancelled=false;
  while(now()-started<6000){
   const status=await probe(false);
-  if(status==='unknown_sheet'){
+  if(status==='unknown_sheet'||status==='target_window_not_visible'){
    // A new native sheet may precede its text/buttons. Wait without clicking.
-   if(now()-started>=2000)throw Error('unknown_guest_sheet_requires_manual_review');
+   if(now()-started>=(status==='target_window_not_visible'?4000:2000))throw Error(status==='target_window_not_visible'?'guest_target_window_not_visible':'unknown_guest_sheet_requires_manual_review');
    await pause(200);continue;
   }
   if(status==='present'){
