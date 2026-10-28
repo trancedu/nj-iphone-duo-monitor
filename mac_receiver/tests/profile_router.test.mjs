@@ -18,7 +18,7 @@ function harness(t,exclusive=false){
 }
 const event=(id,url)=>({event_id:id,product_url:url,detected_at:new Date().toISOString()});
 test('recent fallback chooses latest within ten seconds; a new arrival wins the dispatch grace period',async t=>{
-  const h=harness(t,true);Object.assign(h.config,{recent_request_ttl_seconds:10,release_global_on_unavailable:true});
+  const h=harness(t,true);Object.assign(h.config,{drop_busy_events:false,recent_request_ttl_seconds:10,release_global_on_unavailable:true});
   h.router.accept(event('first',DUO_VARIANTS[0]));await nextTurn();await nextTurn();
   assert.equal(h.router.accept(event('older',DUO_VARIANTS[1])).body.status,'held');
   assert.equal(h.router.accept(event('latest',DUO_VARIANTS[2])).body.status,'held');
@@ -34,7 +34,7 @@ test('recent fallback chooses latest within ten seconds; a new arrival wins the 
   assert.deepEqual(h.calls.map(c=>c.label),['A','D','C']);assert.equal(older.status,'global_waiting');
 });
 test('stale fallback expires and duplicate held ID never extends its lifetime',async t=>{
-  const h=harness(t,true);h.config.recent_request_ttl_seconds=10;
+  const h=harness(t,true);h.config.drop_busy_events=false;h.config.recent_request_ttl_seconds=10;
   h.router.accept(event('owner',DUO_VARIANTS[0]));await nextTurn();await nextTurn();
   const pending=event('waiting',DUO_VARIANTS[1]);h.router.accept(pending);
   const item=h.slots[1].engine.state.events.waiting,at=item.timestamps.received_at;
@@ -63,7 +63,7 @@ for(const fails of [false,true])test(`unavailable releases global only after suc
   restored();await nextTurn();await nextTurn();
   assert.equal(h.router.health().global_locked,fails);
   assert.equal(slot.engine.state.active,fails?'sold-out':null);
-  assert.equal(h.slots[1].engine.state.events.blocked,undefined);
+  assert.equal(h.slots[1].engine.state.events.blocked.status,'busy');
   if(!fails){assert.equal(h.router.accept(event('fresh',DUO_VARIANTS[1])).code,202);await nextTurn();await nextTurn();}
 });
 test('exact URL routing keeps duplicate aliases on first matching profile',async t=>{
@@ -94,7 +94,7 @@ test('global first-arrival lock blocks other profiles without preparing or queui
     h.slots[i].browser.ensurePage=async()=>inspected++;
     await h.router.beforeAccept(later);const result=h.router.accept(later);
     assert.equal(result.code,409);assert.equal(result.body.status,'busy');assert.equal(inspected,0);
-    assert.equal(Object.keys(h.slots[i].engine.state.events).length,0);
+    assert.equal(h.slots[i].engine.state.events['later-'+i].status,'busy');
   }
   await nextTurn();await nextTurn();assert.equal(h.calls.length,1);
   assert.equal(h.router.accept(first).code,200);assert.equal(h.calls.length,1);
@@ -140,7 +140,7 @@ test('four simultaneous HTTP requests execute only the first; later polls never 
     return {code:response.status,body:await response.json()};
   }));
   assert.equal(responses.filter(r=>r.code===202).length,1);
-  assert.equal(responses.filter(r=>r.code===409&&r.body.reason==='global_manual_unlock_required').length,3);
+  assert.equal(responses.filter(r=>r.code===409&&r.body.reason==='busy_event_dropped').length,3);
   await nextTurn();await nextTurn();assert.equal(h.calls.length,1);
   h.router.expireHeld();assert.equal(h.router.health().global_locked,true);
   assert.equal(h.slots.reduce((n,s)=>n+Object.values(s.engine.state.events).filter(e=>e.status==='held').length,0),0);
@@ -187,4 +187,19 @@ for(const backend of ['chrome','safari'])test(`${backend} applies the same first
   assert.equal(await h.router.watchGlobalTimeout(start+59999),false);
   assert.equal(await h.router.watchGlobalTimeout(start+60000),true);assert.equal(timedOut,first.event_id);
   assert.equal(h.slots[3].browser.requestReservations||0,0);
+});
+
+test('strict first arrival drops busy events permanently even with old candidate TTL configured',async t=>{
+  const h=harness(t,true);h.config.recent_request_ttl_seconds=10;
+  const first=event('owner',DUO_VARIANTS[0]),later=event('discarded',DUO_VARIANTS[1]);
+  h.router.accept(first);await nextTurn();await nextTurn();
+  assert.equal(h.router.accept(later).body.status,'busy');
+  assert.equal(h.router.waiting().length,0);assert.equal(h.router.health().busy_event_policy,'drop');
+  assert.equal(h.router.health().recent_request_ttl_seconds,0);
+  h.slots[0].engine.reset('owner');await h.router.reset('owner');
+  assert.equal(h.router.dispatchWaiting(Date.now()+1000),false);
+  assert.equal(h.router.accept(later).body.status,'busy');
+  await nextTurn();assert.deepEqual(h.calls.map(c=>c.label),['A']);
+  assert.equal(h.router.accept(event('new-after-free',DUO_VARIANTS[2])).code,202);
+  await nextTurn();await nextTurn();assert.deepEqual(h.calls.map(c=>c.label),['A','C']);
 });

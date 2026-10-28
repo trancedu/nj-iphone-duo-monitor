@@ -51,15 +51,26 @@ export class ProfileRouter {
     const slot=this.slotForEvent(this.globalLock?.event_id),item=slot?.engine.state.events[this.globalLock.event_id];
     return !!item&&(item.status==='awaiting_user'||['pickup_stock_found_at','store_selected_at','time_selected_at','pickup_time_at','details_navigation_at','contact_verified_at','handoff_at'].some(k=>Object.hasOwn(item.timestamps,k)));
   }
+  dropBusyEvents(){return this.config.single_active_request&&this.config.drop_busy_events!==false;}
   waiting(){return this.slots.flatMap(slot=>Object.values(slot.engine.state.events).filter(e=>e.status==='global_waiting').map(item=>({slot,item})));}
   expireWaiting(nowMs=Date.now()){
-    const ttl=(this.config.recent_request_ttl_seconds||0)*1000;
+    const ttl=this.dropBusyEvents()?0:(this.config.recent_request_ttl_seconds||0)*1000;
     for(const {slot,item} of this.waiting())if(!ttl||nowMs-Date.parse(item.timestamps.received_at)>ttl||nowMs-Date.parse(item.detected_at)>ttl){
       item.status='expired';item.reason='recent_request_expired';item.timestamps.finished_at=new Date(nowMs).toISOString();slot.engine.save();
     }
   }
   holdRecent(slot,event){
     this.expireWaiting();
+    if(this.dropBusyEvents()){
+      if(Object.keys(slot.engine.state.events).length>=4096)return {code:429,body:{event_id:event.event_id,status:'event_capacity_reached'}};
+      const at=new Date().toISOString();
+      // A terminal rejection is durable: retrying the same ID after unlock must
+      // not unexpectedly start a task that arrived while the user was busy.
+      const item={...event,fingerprint:fingerprint(event),status:'busy',reason:'busy_event_dropped',
+        timestamps:{detected_at:event.detected_at,received_at:at,finished_at:at}};
+      slot.engine.state.events[event.event_id]=item;slot.engine.save();slot.engine.log(item,'busy_event_dropped');
+      return {code:409,body:{...this.public(item),active_event_id:this.globalLock.event_id}};
+    }
     const ttl=this.config.recent_request_ttl_seconds||0;
     if(!ttl)return {code:409,body:{event_id:event.event_id,status:'busy',reason:'global_manual_unlock_required',active_event_id:this.globalLock.event_id}};
     const at=new Date().toISOString(),fresh=Date.now()-Date.parse(event.detected_at)<=ttl*1000&&Date.parse(event.detected_at)<=Date.now()+1000;
@@ -69,6 +80,7 @@ export class ProfileRouter {
     return {code:202,body:this.public(item)};
   }
   dispatchWaiting(nowMs=Date.now()){
+    if(this.dropBusyEvents()){this.expireWaiting(nowMs);return false;}
     if(this.globalLock?.event_id||nowMs<(this.dispatchNotBefore||0)||this.slots.some(s=>s.engine.state.active||s.engine.releasing||s.engine.signaling))return false;
     this.expireWaiting(nowMs);
     const next=this.waiting().sort((a,b)=>b.item.timestamps.received_at.localeCompare(a.item.timestamps.received_at))[0];
@@ -141,7 +153,7 @@ export class ProfileRouter {
   health(){
     const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],...s.engine.health()}));
     this.expireWaiting();
-    return {status:'ok',recent_waiting:this.waiting().length,stock_page_protected:this.stockProtected(),recent_request_ttl_seconds:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
+    return {status:'ok',busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.stockProtected(),recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
   }
 }
 
@@ -161,6 +173,7 @@ export async function main() {
   if(!['chrome','safari'].includes(cfg.browser_backend||'chrome'))throw new Stop('invalid_browser_backend');
   if(cfg.single_active_request!==undefined&&typeof cfg.single_active_request!=='boolean')throw new Stop('invalid_execution_policy');
   if(cfg.release_global_on_unavailable!==undefined&&typeof cfg.release_global_on_unavailable!=='boolean')throw new Stop('invalid_unavailable_release_policy');
+  if(cfg.drop_busy_events!==undefined&&typeof cfg.drop_busy_events!=='boolean')throw new Stop('invalid_busy_event_policy');
   if(cfg.recent_request_ttl_seconds!==undefined&&(!Number.isInteger(cfg.recent_request_ttl_seconds)||cfg.recent_request_ttl_seconds<0||cfg.recent_request_ttl_seconds>10))throw new Stop('invalid_recent_request_ttl');
   if(cfg.global_lock_timeout_seconds!==undefined&&(!Number.isInteger(cfg.global_lock_timeout_seconds)||cfg.global_lock_timeout_seconds<0||cfg.global_lock_timeout_seconds>86400))throw new Stop('invalid_global_lock_timeout');
   if(cfg.global_lock_timeout_seconds&&(!cfg.single_active_request||!cfg.global_timeout_python||!cfg.global_timeout_unlock_script||!existsSync(cfg.global_timeout_python)||!existsSync(cfg.global_timeout_unlock_script)))throw new Stop('global_timeout_helper_required');

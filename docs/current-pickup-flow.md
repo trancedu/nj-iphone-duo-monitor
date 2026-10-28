@@ -1,5 +1,8 @@
 # 当前库存检测与 Safari 接手流程
 
+> 最新仓库执行策略：全局只做先到的一条，`drop_busy_events=true`；忙时后续事件终态busy，不排队、不补跑，重复ID在解锁后仍不执行。旧held队列/候选描述仅为兼容历史模式，不是本次用户选择。见[当前执行策略](pickup-execution-policy.md)及[单任务机会重算](opportunity-first-only-2026-10-27.md)。Mac当前接口不可达，运行版本尚未核验更新。
+
+
 2026-10-27 更新：当前生产已切换到 [纯 DataImpulse 每秒入口](dataimpulse-live.md) `dataimpulse_monitor.py`，不再运行原订阅池。下文第 1 节保留旧代理池的调度说明；库存解析、Telegram、LAN HTTP 协议和 Safari 路由仍复用相同实现。接收 Mac 是独立部署，Mini 上 git pull 不会自动升级或重启它。
 
 ```mermaid

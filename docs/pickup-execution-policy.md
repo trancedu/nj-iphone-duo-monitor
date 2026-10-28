@@ -1,7 +1,7 @@
-# 自提执行策略：单任务、两次刷新、10秒内最新候选、有货保护
+# 自提执行策略：只做最先到的一条，忙时丢弃，不排队
 
-更新：2026-10-27。适用于正式 ProfileRouter 的 Safari 与 Chrome；当前正式接收为 Safari。
-本文替代旧的“不补跑、始终60秒回袋、3次/5次刷新”等历史规则。
+更新：2026-10-27。适用于仓库 ProfileRouter 的 Safari 与 Chrome。
+本次规则替代旧的10秒候选补跑。Mac当前LAN接口不可达，运行版本尚未确认更新；不能声称仓库默认已在Mac生效。
 
 ## 一次只操作一个页面
 
@@ -20,24 +20,19 @@
 完成两次刷新仍明确无货时，先将该 Profile 恢复到正确商品、数量1的购物袋，恢复成功才释放
 单Profile锁和全局锁。不必继续等到60秒。回袋失败则保留锁，交给无货/错误任务的超时清理。
 
-## 新请求优先，旧候选最多保留10秒
+## 忙时后续事件直接丢弃
 
-执行期间被挡住的请求，以 `held` 返回，但内部是全局候选，不是各Profile自行执行的队列。
-只有“自检测时间”和“自Mac首次收到时间”均不超过10秒的候选才可补跑；重复传输不刷新计时。
-超过10秒标记expired，永不补跑。候选最多32条；容量不足时明确拒绝，不无限堆积。
+最新用户规则：第一条取得全局锁后，后续事件直接返回409 / busy，不打开页面、不排队、不补跑，
+也不会选择后来更长或更高价值的库存。当前任务完成或放弃并释放后，只能接收那之后的新事件。
 
-首项完成回袋后：
+`single_active_request=true` 时仓库默认 `drop_busy_events=true`。被拒绝的事件持久化为终态busy；
+同一event_id在解锁后重发仍返回原busy，避免延迟重试突然开单。新event_id在空闲时可以立即开始。
+旧global_waiting记录会过期，调度器不执行它们；health显示 `busy_event_policy=drop`、
+`recent_request_ttl_seconds=0`。旧10秒最新候选机制仅在显式 `drop_busy_events=false` 时保留兼容，
+不属于本次用户选择，不能在部署时意外打开。
 
-1. 至少留500毫秒调度缓冲，优先接纳此时新到的请求。
-2. 无新请求、全局无任务、没有回袋或提示操作进行中时，才挑选仍新鲜的**最新收到候选**。
-3. 一次只选一条；候选正式开始后不会被后来的通知强行打断。后来的通知进入同一10秒候选规则。
-4. 程序每秒检查一次调度；等待过程也计入10秒。恢复服务时候选全部过期，不重放重启前通知。
-
-“新请求优先”只作用于选下一项的时刻，不意味着抢占已开始点击的任务；否则会重新产生并发和页面干扰。
-当前Python桥接会对同门店/SKU/日期复用事件ID；重复ID不是新的机会，本策略不会为了补跑而改写ID。
-
-例：t=0执行512白；t=2暂存512黑；t=4暂存另一条512白。首项明确无货并回袋后，若有新通知则优先新通知；
-否则选择t=4那条，前提它仍在10秒内。若首项拖到t=20，这两条都丢弃。
+短窗口如果先到也会占住任务并挡住后面的长窗口。这是“只做第一条”的取舍，
+不能在复盘中预先过滤短事件再选择好机会。详见[严格单任务机会重算](opportunity-first-only-2026-10-27.md)。
 
 ## 最重要：有货就保留页面，不自动解锁
 
@@ -70,8 +65,9 @@
 ```json
 {
   "single_active_request": true,
+  "drop_busy_events": true,
   "release_global_on_unavailable": true,
-  "recent_request_ttl_seconds": 10,
+  "recent_request_ttl_seconds": 0,
   "global_lock_timeout_seconds": 60,
   "pickup_unavailable_retries": 2,
   "queue_while_busy": false,
@@ -84,15 +80,26 @@
 ```
 
 还需私有配置中的 `global_timeout_python` 与 `global_timeout_unlock_script` 本机路径。
-各Profile的旧held队列保持关闭，10秒候选由统一router调度，避免跨Profile并发。
+各Profile的旧held队列保持关闭，忙时事件不进入任何候选队列。
 
 ## 代码与验证
 
-- `mac_receiver/profile_router.mjs`：全局锁、候选期限/最新优先、释放缓冲、有货超时保护。
+- `mac_receiver/profile_router.mjs`：全局锁、忙时终态丢弃、重复拒绝幂等、有货超时保护。
 - `mac_receiver/engine.mjs`：明确无货回袋后通知router释放；有货后失败保留页面。
 - `mac_receiver/browser.mjs`、`safari/shopping.mjs`：目标门店验证、展开、有货标记和两次刷新。
 - `deploy/clear_receiver_locks.py`：停止控制器后清理，自动清理二次核验有货保护。
-- 测试覆盖新请求优先、候选过期、重复不延长、有货三种状态免超时、回袋失败保留锁。
+- 测试覆盖四条HTTP同时到达仅首条执行、忙时事件解锁后重发仍不执行、有货三种状态免超时和回袋失败保留锁。
 
 真实库存与checkout可能存在竞争/不一致；明确无货不能证明原因一定是“被别人抢走”。
 独立测试CLI不提供跨进程统一调度，不能与正式服务同时控制同一Profile。
+
+
+## Mac 上启用与验收
+
+先同步代码并保留Mac本机更新的pickup待机实现及私有配置。确保single_active_request=true、
+drop_busy_events=true、recent_request_ttl_seconds=0、queue_while_busy=false。
+仅在没有需要保留的有货/付款任务时按现有部署说明重载接收器；不要为了改策略清掉正在付款的页面。
+检查认证GET /health返回busy_event_policy=drop、recent_waiting=0、recent_request_ttl_seconds=0。
+默认变化不会依赖旧TTL值；但显式drop_busy_events=false必须移除或改为true。
+
+本次Mini只修改并测试仓库代码，没有通过不可达的Mac接口更改配置、重置锁或操作浏览器。
