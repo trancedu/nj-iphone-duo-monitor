@@ -13,6 +13,16 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def bootstrap_service(domain, plist):
+    # launchd can briefly reject re-registration after bootout, even after the
+    # old process has released its lock. Retry the registration, never the task.
+    for delay in (0, .2, .5, 1, 2):
+        if delay:time.sleep(delay)
+        result=subprocess.run(['launchctl','bootstrap',domain,str(plist)],capture_output=True)
+        if result.returncode==0:return
+    raise RuntimeError('LaunchAgent registration failed after bounded retries')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['start-test', 'start-live', 'stop-test', 'stop-live', 'status'])
@@ -94,7 +104,7 @@ def main():
                 if time.monotonic()>=until:raise RuntimeError('Previous monitor has not stopped; no second monitor started')
                 time.sleep(.2)
         fcntl.flock(lock,fcntl.LOCK_UN)
-    subprocess.run(['launchctl', 'bootstrap', domain, str(plist)], check=True)
+    bootstrap_service(domain,plist)
     provider_file.write_text(json.dumps({'provider':args.provider})+'\n')
     subprocess.run(['launchctl', 'print', f'{domain}/{label}'], check=True)
 

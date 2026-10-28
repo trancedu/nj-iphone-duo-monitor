@@ -22,13 +22,14 @@ def payload(quote='Available Today', display='available', state='NJ'):
     return {'body':{'content':[item]}}
 
 class MonitorTests(unittest.TestCase):
-    def test_all_four_configurations_share_one_regional_request(self):
+    def test_all_six_configurations_share_one_regional_request(self):
         config=json.loads((m.ROOT/'config.json').read_text())
         with patch.object(m.random,'choice',side_effect=AssertionError('must not sample')):
             products=m.select_products(config)
         self.assertEqual({p['name'] for p in products.values()}, {
             'iPhone Duo 256GB Star White','iPhone Duo 256GB Night Sky',
-            'iPhone Duo 512GB Star White','iPhone Duo 512GB Night Sky'})
+            'iPhone Duo 512GB Star White','iPhone Duo 512GB Night Sky',
+            'iPhone Duo 1TB Star White','iPhone Duo 1TB Night Sky'})
         client=m.Client()
         with patch.object(client,'get',return_value='{}') as get:
             client.inventory_region(products,'07094')
@@ -36,6 +37,32 @@ class MonitorTests(unittest.TestCase):
         query=urllib.parse.parse_qs(urllib.parse.urlsplit(get.call_args.args[0]).query)
         self.assertEqual(query['location'],['07094'])
         self.assertEqual({v[0] for k,v in query.items() if k.startswith('parts.')},set(products))
+
+    def test_unrouted_one_tb_still_sends_telegram_but_not_mac(self):
+        catalog=json.loads((m.ROOT/'catalog.json').read_text())
+        for sku in ['MK1J4LL/A','MK1L4LL/A']:
+            with self.subTest(sku=sku),tempfile.TemporaryDirectory() as path:
+                product=catalog[sku]
+                offer={'sku':sku,**product,'store_id':'R755','store':'Apple American Dream',
+                       'state':'NJ','date':TODAY.isoformat(),'quote':'Available Today'}
+                config={'mac_forward_skus':['MK1E4LL/A','MK1F4LL/A','MK1G4LL/A','MK1H4LL/A']}
+                with patch.object(m,'telegram') as telegram,patch('pickup_bridge.enqueue_confirmed_offer') as bridge:
+                    m.notify_offer(offer,config,{},Path(path),False,set())
+                telegram.assert_called_once();self.assertIn(product['name'],telegram.call_args.args[0])
+                bridge.assert_not_called()
+
+    def test_one_tb_forwards_once_when_mac_route_enabled(self):
+        catalog=json.loads((m.ROOT/'catalog.json').read_text())
+        for sku in ['MK1J4LL/A','MK1L4LL/A']:
+            with self.subTest(sku=sku),tempfile.TemporaryDirectory() as path:
+                offer={'sku':sku,**catalog[sku],'store_id':'R755','store':'Apple American Dream',
+                       'state':'NJ','date':TODAY.isoformat(),'quote':'Available Today'}
+                with patch.object(m,'telegram') as telegram,patch('pickup_bridge.enqueue_confirmed_offer') as bridge:
+                    m.notify_offer(offer,{'mac_forward_skus':[sku]}, {},Path(path),False,set())
+                telegram.assert_called_once();bridge.assert_called_once()
+                self.assertEqual(bridge.call_args.args[0]['sku'],sku)
+                self.assertIn('-1tb-',bridge.call_args.args[0]['url'])
+                self.assertNotIn('1024gb',bridge.call_args.args[0]['url'])
 
     def test_explicit_batch_rejects_missing_duplicate_or_empty_skus(self):
         for skus in [[],['missing'],['DUO','DUO'],'DUO',[None]]:

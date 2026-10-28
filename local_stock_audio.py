@@ -17,10 +17,10 @@ LOG = logging.getLogger('stock.audio')
 
 
 def phrase_for(offer):
-    match = re.fullmatch(r'iPhone Duo (256|512)GB (Star White|Night Sky)', offer.get('name', ''))
+    match = re.fullmatch(r'iPhone Duo (256GB|512GB|1TB) (Star White|Night Sky)', offer.get('name', ''))
     if not match:
         return None
-    return {'256': '二五六', '512': '五一二'}[match[1]] + ('白' if match[2] == 'Star White' else '黑')
+    return {'256GB': '二五六', '512GB': '五一二', '1TB': '一T'}[match[1]] + ('白' if match[2] == 'Star White' else '黑')
 
 
 def fresh(offer, now, max_age):

@@ -135,7 +135,7 @@ class ProxyMonitorTests(unittest.TestCase):
                 for sku in products}}]}}
         with patch.dict(p.os.environ, {'APPLE_PICKUP_ZIP': '94596'}):
             offers = p.parse_offers(raw, products, config, '94596')
-        self.assertEqual(len(offers), 4)
+        self.assertEqual(len(offers), 6)
         self.assertEqual({o['pickup_zip'] for o in offers}, {'94596'})
         self.assertEqual({o['state'] for o in offers}, {'CA'})
         with patch.dict(p.os.environ, {}, clear=True):

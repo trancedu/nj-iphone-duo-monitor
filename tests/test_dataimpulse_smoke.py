@@ -55,7 +55,7 @@ class DataImpulseTests(unittest.TestCase):
         self.assertEqual(len(report['probes']),3)
         self.assertEqual(client.inventory_calls,1)
         self.assertEqual(report['inventory']['stores'],12)
-        self.assertEqual(report['inventory']['configurations'],4)
+        self.assertEqual(report['inventory']['configurations'],6)
         self.assertFalse(report['production_enabled']);notify.assert_not_called();bridge.assert_not_called()
 
     def test_country_mismatch_skips_apple(self):

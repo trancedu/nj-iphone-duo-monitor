@@ -12,11 +12,11 @@ class SpeechTests(unittest.TestCase):
     def offer(self,name='iPhone Duo 256GB Night Sky',**extra):
         return {'name':name,'sku':'black256','store_id':'R755','date':'2026-10-27',
                 'observed_at':dt.datetime.now(dt.timezone.utc).isoformat(),**extra}
-    def test_four_short_phrases_and_no_other_models(self):
-        for name,phrase in [('256GB Night Sky','二五六黑'),('256GB Star White','二五六白'),('512GB Night Sky','五一二黑'),('512GB Star White','五一二白')]:
+    def test_six_short_phrases_and_no_other_models(self):
+        for name,phrase in [('256GB Night Sky','二五六黑'),('256GB Star White','二五六白'),('512GB Night Sky','五一二黑'),('512GB Star White','五一二白'),('1TB Night Sky','一T黑'),('1TB Star White','一T白')]:
             self.assertEqual(audio.phrase_for(self.offer('iPhone Duo '+name)),phrase)
         self.assertIsNone(audio.phrase_for(self.offer('iPhone 18 Pro 256GB Night Sky')))
-        self.assertIsNone(audio.phrase_for(self.offer('iPhone Duo 1TB Night Sky')))
+        self.assertIsNone(audio.phrase_for(self.offer('iPhone Duo 2TB Night Sky')))
     def test_submit_does_not_wait_for_speech_and_coalesces_other_stores(self):
         entered=threading.Event();release=threading.Event()
         with tempfile.TemporaryDirectory() as directory:

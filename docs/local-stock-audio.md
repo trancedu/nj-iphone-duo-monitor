@@ -8,6 +8,8 @@ The Mini now speaks short Chinese configuration names through its physical **Mac
 | 256GB Star White | 二五六白 |
 | 512GB Night Sky | 五一二黑 |
 | 512GB Star White | 五一二白 |
+| 1TB Night Sky | 一T黑 |
+| 1TB Star White | 一T白 |
 
 `local_stock_audio.py` is an independent process. It tails the existing confirmed `runtime/proxy-monitor/availability-events.jsonl` every 100ms, submits fresh observations to a bounded queue, and plays them on a dedicated Python worker thread. It adds no Apple requests, never loads secrets, never sends test events to Telegram/Mac and never changes polling or checkout code. The monitor need not be restarted to enable or disable it.
 
@@ -49,3 +51,6 @@ LaunchAgent: `~/Library/LaunchAgents/com.trancedu.iphone-duo-local-audio.plist` 
 - Real local test command completed successfully with “测试。二五六黑，五一二白。”
 - The deployed service observed a fresh real 512GB Night Sky event, logged approximately 2ms queue delay and successful playback completion in about 1.3 seconds.
 - Inventory PID 72913 remained running at one-second target dispatch / four workers. No monitor restart or additional inventory request was required.
+
+
+2026-10-28：增加两种颜色的1TB语音映射。与原四款共用独立队列和去重策略；2TB仍不播报。模拟测试必须带“测试”前缀，不向真实到货日志或Mac前端注入伪库存。

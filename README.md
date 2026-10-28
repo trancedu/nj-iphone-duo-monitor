@@ -13,7 +13,7 @@ Python 3.9+ standard-library monitor for Apple US store pickup.
 
 ## Split pickup response (Mac mini → Mac)
 
-See the [current end-to-end flow and Mini–Mac HTTP protocol](docs/current-pickup-flow.md) for polling, Telegram, authenticated LAN delivery, retries, status queries and deduplication. The production Mac receiver routes four products to independent Safari Profiles; its configured workflow prepares pickup details and stops before final Apple Pay authorization. The original [split deployment guide](docs/split-pickup-deployment.md) documents the initial Chrome/dry-run setup. LAN forwarding is opt-in; existing Telegram stock alerts remain independent.
+See the [current end-to-end flow and Mini–Mac HTTP protocol](docs/current-pickup-flow.md) for polling, Telegram, authenticated LAN delivery, retries, status queries and deduplication. The Mac receiver routes products to independent Safari Profiles; the user confirmed1TB frontend readiness on2026-10-28, and Mini forwarding now includes all six monitored variants; its configured workflow prepares pickup details and stops before final Apple Pay authorization. The original [split deployment guide](docs/split-pickup-deployment.md) documents the initial Chrome/dry-run setup. LAN forwarding is opt-in; existing Telegram stock alerts remain independent.
 
 The optional [DataImpulse smoke test](docs/dataimpulse-smoke.md) checks credentials, country targeting and one inventory response with bounded traffic. It does not enable DataImpulse production polling.
 
@@ -35,13 +35,15 @@ The [read-only stock dashboard](docs/dashboard.md) shows live store/configuratio
 
 ## Current stock monitoring
 
-**Latest manual mode (2026-10-27): Clash subscription pool; DataImpulse is stopped.** Provider selection is manual via `IPHONE_MONITOR_PROVIDER` / `--provider`, with no scheduled switching. Service-managed Clash mode explicitly disables paid fallback. See [manual mode switching](docs/manual-monitor-provider.md). The DataImpulse deployment description immediately below describes the retained paid-mode configuration, not the currently selected source.
+**Current Mini mode (2026-10-28): Clash subscription pool; DataImpulse remains stopped.** ZIP07094/12 stores, target dispatch every2 seconds, four workers, and a minimum60-second measured-IP interval are unchanged. Each request now batches **six** variants: 256GB/512GB/1TB × Star White/Night Sky; 2TB is excluded. Provider selection remains manual via `IPHONE_MONITOR_PROVIDER` / `--provider`, with paid fallback disabled in service-managed Clash mode. See [manual switching](docs/manual-monitor-provider.md) and the [1TB batch comparison/deployment](docs/one-tb-monitoring-2026-10-28.md).
 
-Current Mac mini deployment (2026-10-27): **`dataimpulse_monitor.py` is the only live inventory source**, targeting US Rotating exits, ZIP **07094 (12 stores)** and all four 256GB/512GB color combinations. Target dispatch spacing is one second with at most four requests in flight. Telegram, LAN forwarding and stock deduplication are preserved. The old subscription-pool and hybrid trial modes are inactive. See [current DataImpulse-only deployment](docs/dataimpulse-live.md); older proxy/region schedules below are historical modes.
+Telegram, Mini speech and Mac forwarding cover all six variants. The user confirmed the1TB frontend is configured; `mac_forward_skus` now includes both1TB SKUs as well as the original four.
 
-- Production alerts: iPhone Duo only, connect to a carrier later. Every request batches all four 256GB/512GB × Star White/Night Sky configurations; 1TB and 2TB are excluded.
+The earlier [DataImpulse-only deployment](docs/dataimpulse-live.md) is a retained alternative, not the currently selected source.
+
+- Production alerts: iPhone Duo only, connect to a carrier later.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.
-- Regular scans start approximately every 180–190 seconds. Every day from 07:55 inclusive to 08:15 exclusive in America/New_York, scans start approximately every 60–70 seconds. Two sequential regional requests, five seconds apart, remain the maximum per cycle. Each request batches both selected SKUs. Failures always use the longer backoff, including during the morning window. No parallel workers or overlapping scans.
+- Historical direct-monitor schedule (inactive in current Clash deployment): regular scans start approximately every180–190 seconds. Every day from 07:55 inclusive to 08:15 exclusive in America/New_York, scans start approximately every 60–70 seconds. Two sequential regional requests, five seconds apart, remain the maximum per cycle. Each request batches both selected SKUs. Failures always use the longer backoff, including during the morning window. No parallel workers or overlapping scans.
 - HTTP errors back off 5, 10, 20, 40, then 60 minutes; honor longer Retry-After. No proxy rotation, CAPTCHA handling, or immediate retry loops.
 - Same store/SKU/date notification suppressed for 30 minutes, including across restarts. Failed sends are retried on a later scan.
 - An independent launchd watchdog checks health every minute. Process exits/hangs must persist for two minutes; failed queries/notifications for five minutes. It sends one alert per outage and one recovery notice after two healthy checks. New outage alerts are limited to one per hour; failed Telegram attempts retry at most every five minutes. State survives restarts.

@@ -9,6 +9,8 @@ const fmt=t=>t?dateTime.format(new Date(t*1000)):'—', sec=n=>n==null?'—':Num
 const short=sku=>(data.products[sku]?.name||sku).replace('iPhone Duo ','').replace('Star White','白色').replace('Night Sky','黑色');
 const monitored=sku=>data.stores.some(s=>s.sku===sku), storeName=s=>s.replace(/^Apple /,'');
 function status(){
+ const capacities=[...new Set(data.stores.map(s=>(data.products[s.sku]?.name||'').match(/(?:256GB|512GB|1TB|2TB)/)?.[0]).filter(Boolean))];
+ $('catalog-summary').textContent='iPhone Duo · '+capacities.join(' / ')+' · 两种颜色';
  const fresh=age(data.monitor.last_success_at)<20 && age(data.generated_at)<20;
  $('health').textContent=fresh?'● 监控正在运行':'● 数据延迟 / 需检查';$('health').className=fresh?'good':'bad';$('live-dot').className='dot'+(fresh?' live':'');
  $('updated').textContent=`最近成功 ${fmt(data.monitor.last_success_at)}`;
@@ -28,7 +30,7 @@ function chart(){
 }
 function stores(){
  const groups=new Map();data.stores.forEach(s=>{if(!groups.has(s.store_id))groups.set(s.store_id,[]);groups.get(s.store_id).push(s);});
- const q=$('search').value.toLowerCase();$('store-count').textContent=`${groups.size} 家 · 4 个配置`;
+ const q=$('search').value.toLowerCase();$('store-count').textContent=`${groups.size} 家 · ${new Set(data.stores.map(s=>s.sku)).size} 个配置`;
  $('store-grid').innerHTML=[...groups].filter(([,ss])=>`${ss[0].store} ${ss[0].city} ${ss[0].state}`.toLowerCase().includes(q)).map(([sid,ss])=>{const s=ss[0], all=ss.slice().sort((a,b)=>short(a.sku).localeCompare(short(b.sku)));return `<article class="store-card"><div class="store-top"><h3>${esc(storeName(s.store))}</h3><small>${esc(s.state)}</small></div><div class="store-meta">${esc(s.city)} · ${esc(sid)}</div><div class="stock-grid">${all.map(p=>{const stale=age(p.observed_at)>20, cls=stale?'stale':p.eligible?'yes':p.available?'other':'', label=stale?'最近状态已过期':p.eligible?`可自提 · ${p.pickup_date}`:p.available?'有货 · 不符近期条件':'未见近期自提';return `<div class="stock ${cls}" title="${esc(p.quote)}"><b>${esc(short(p.sku))}</b>${esc(label)}</div>`;}).join('')}</div><div class="store-bottom"><span>观察 ${esc(fmt(s.observed_at))}</span><button data-store="${esc(sid)}">查看到货历史 →</button></div></article>`;}).join('')||'<div class="empty">没有匹配的门店</div>';
  $('store-grid').querySelectorAll('[data-store]').forEach(b=>b.onclick=()=>{$('store-filter').value=b.dataset.store;historyPage=0;history();$('history').scrollIntoView({behavior:'smooth'});});
 }

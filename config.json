@@ -18,6 +18,14 @@
     "MK1H4LL/A": {
       "name": "iPhone Duo 512GB Night Sky",
       "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-512gb-night-sky-unlocked"
+    },
+    "MK1J4LL/A": {
+      "name": "iPhone Duo 1TB Star White",
+      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-1tb-star-white-unlocked"
+    },
+    "MK1L4LL/A": {
+      "name": "iPhone Duo 1TB Night Sky",
+      "url": "https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-1tb-night-sky-unlocked"
     }
   },
   "stores": {
@@ -137,7 +145,9 @@
       "MK1E4LL/A",
       "MK1F4LL/A",
       "MK1G4LL/A",
-      "MK1H4LL/A"
+      "MK1H4LL/A",
+      "MK1J4LL/A",
+      "MK1L4LL/A"
     ]
   },
   "morning_peak": {
@@ -185,5 +195,13 @@
         "R753"
       ]
     }
+  ],
+  "mac_forward_skus": [
+    "MK1E4LL/A",
+    "MK1F4LL/A",
+    "MK1G4LL/A",
+    "MK1H4LL/A",
+    "MK1J4LL/A",
+    "MK1L4LL/A"
   ]
 }

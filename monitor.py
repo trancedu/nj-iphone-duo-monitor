@@ -229,7 +229,9 @@ def notify_offer(offer,config,state,runtime,dry_run,opened):
         output.write(json.dumps(event,ensure_ascii=False)+'\n')
     # Independent durable outbox: network retries never run on the polling thread.
     # Its event ID/deduplication survives Telegram failures and process restarts.
-    if not dry_run and offer['name'].startswith('iPhone Duo '):
+    forward_skus=config.get('mac_forward_skus')
+    if (not dry_run and offer['name'].startswith('iPhone Duo ') and
+            (forward_skus is None or offer['sku'] in forward_skus)):
         try:
             from pickup_bridge import enqueue_confirmed_offer
             enqueue_confirmed_offer(event, runtime, telegram)

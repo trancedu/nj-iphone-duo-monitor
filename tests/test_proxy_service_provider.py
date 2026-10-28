@@ -30,6 +30,14 @@ class ProviderTests(unittest.TestCase):
             self.assertIn('--disable-paid-fallback',job['ProgramArguments'])
             self.assertEqual(job['EnvironmentVariables'],{'IPHONE_MONITOR_PROVIDER':'clash'})
             self.assertEqual(json.loads((runtime/'live-provider.json').read_text()),{'provider':'clash'})
+    def test_transient_launchd_registration_failure_is_retried(self):
+        with patch.object(service.subprocess,'run',side_effect=[subprocess.CompletedProcess([],5),subprocess.CompletedProcess([],0)]) as run,patch.object(service.time,'sleep'):
+            service.bootstrap_service('gui/123',Path('/tmp/example.plist'))
+        self.assertEqual(run.call_count,2)
+    def test_permanent_launchd_failure_is_bounded(self):
+        with patch.object(service.subprocess,'run',return_value=subprocess.CompletedProcess([],5)) as run,patch.object(service.time,'sleep'):
+            with self.assertRaises(RuntimeError):service.bootstrap_service('gui/123',Path('/tmp/example.plist'))
+        self.assertEqual(run.call_count,5)
     def test_environment_overrides_saved_paid_provider(self):self.run_install('clash',None)
     def test_explicit_selection_overrides_environment(self):self.run_install('dataimpulse','clash')
 

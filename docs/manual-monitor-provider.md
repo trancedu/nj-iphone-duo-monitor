@@ -19,7 +19,7 @@ IPHONE_MONITOR_PROVIDER=clash python3 deploy/proxy_service.py start-live \
   --env-file /Users/codex/.codex/secrets/market-radar.env
 ```
 
-Clash mode merges the cached subscription profiles, verifies exit connectivity and deduplicates measured IPs before polling. It retains ZIP 07094, 12 stores and all four monitored variants, target spacing 2s, four workers, at least 60s between requests on each measured IP, and existing error cooldowns. Warmup can take a few minutes if subscription nodes are slow/unreachable. Actual successful refresh gaps depend on available exits and failures, and are not guaranteed to be 2s. Existing subscriptions may themselves have a subscription cost, but this mode makes no DataImpulse inventory requests.
+Clash mode merges the cached subscription profiles, verifies exit connectivity and deduplicates measured IPs before polling. It retains ZIP 07094, 12 stores and all six monitored variants (256GB/512GB/1TB in two colors, updated2026-10-28), target spacing 2s, four workers, at least 60s between requests on each measured IP, and existing error cooldowns. Warmup can take a few minutes if subscription nodes are slow/unreachable. Actual successful refresh gaps depend on available exits and failures, and are not guaranteed to be 2s. Existing subscriptions may themselves have a subscription cost, but this mode makes no DataImpulse inventory requests.
 
 Every service-managed Clash invocation includes **`--disable-paid-fallback`**. This ignores any old `DATAIMPULSE_FALLBACK_CONFIG` entry in the private notification environment file, so a stale hybrid configuration cannot silently resume paid requests.
 

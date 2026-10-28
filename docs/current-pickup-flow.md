@@ -1,5 +1,8 @@
 # 当前库存检测与 Safari 接手流程
 
+> 2026-10-28 Mini容量更新：一个API请求同时查询256GB/512GB/1TB两色共六款；Telegram和Mini语音覆盖六款。用户已确认1TB前端就绪，`mac_forward_skus`六款全部启用LAN转发。见[1TB对照测试与部署](one-tb-monitoring-2026-10-28.md)。
+
+
 > 最新仓库执行策略：全局只做先到的一条，`drop_busy_events=true`；忙时后续事件终态busy，不排队、不补跑，重复ID在解锁后仍不执行。旧held队列/候选描述仅为兼容历史模式，不是本次用户选择。见[当前执行策略](pickup-execution-policy.md)及[单任务机会重算](opportunity-first-only-2026-10-27.md)。Mac当前接口不可达，运行版本尚未核验更新。
 
 

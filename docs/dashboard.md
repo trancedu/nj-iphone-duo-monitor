@@ -6,8 +6,8 @@ Open from a device connected to the same Tailscale network. This is a private pr
 
 ## What it shows
 
-- Current 12-store, four-configuration inventory: 256GB / 512GB × Star White / Night Sky, from the production ZIP 07094 response.
-- Separate store cards and a filterable history by store, capacity, color and date range. Older 1TB / 2TB observations are retained and marked historical; they are not currently polled.
+- Current 12-store, six-configuration inventory: 256GB / 512GB / 1TB × Star White / Night Sky, from the production ZIP 07094 response.
+- Separate store cards and a filterable history by store, capacity, color and date range. Older1TB/2TB observations are retained; 1TB joined monitoring on2026-10-28 and only2TB remains historical-only.
 - First positive observation, last positive observation, pickup dates and subsequent disappearance evidence. Repeated observations are merged into periods, never presented as a count of phones.
 - 5 / 30 / 60 minute request counts, errors, HTTP 541, success rate, mean/P95/max successful refresh gaps, average successful response latency, a one-hour per-minute result chart and the last 200 completed queries.
 - Stale data and connection warnings. A failed query is never interpreted as out-of-stock.
@@ -126,3 +126,6 @@ Exported fields: `previous_unavailable` / `next_unavailable` contain response ti
 Audit of the 88 old records whose first-positive-to-negative span was at most three seconds: a loose prior-response scan found 71 had a successful zero-offer response within three seconds before first detection (31 within one second), but this did not yet exclude boundaries from before another segment. After the stricter per-segment/request-order checks, 64 have usable preceding negatives; 56 of those are within three seconds, 23 within one second, and five over ten seconds away. Only 45 have both usable sides; 43 now have unknown upper estimates (24 lack a valid preceding boundary, 19 lack a following non-overlapping boundary). These data do not establish whether stock was purchased or withdrawn.
 
 Eighteen focused tests pass, including the new upper formula, nearest preceding/first following selection, error/wrong-store exclusion, in-flight negative exclusion, not borrowing another segment's boundaries, absent-boundary unknowns and request-envelope arithmetic. Production monitor PID 87305 was unchanged; only the independent dashboard observer was reloaded.
+
+
+2026-10-28：增加1TB两色后，门店配置数与容量标题改为读取实际SKU，不再写死四款。六款正常产生72个门店/配置状态；不改变历史分段或时长区间口径。
