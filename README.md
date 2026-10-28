@@ -22,6 +22,8 @@ The [bounded hybrid fallback](docs/hybrid-dataimpulse.md) can use DataImpulse on
 
 See the [2s / 1.5s / 1s DataImpulse cadence comparison](docs/dataimpulse-cadence-2026-10-27.md) for the finite isolated experiment and its response-time, gap and traffic tradeoffs.
 
+For a timing budget and limitations of the pickup-page standby path versus manual iPhone checkout, see the [frontend latency review](docs/frontend-latency-review-2026-10-27.md). The estimates are not current-path benchmark results.
+
 ## Mac mini voice alerts
 
 The [independent local speaker](docs/local-stock-audio.md) announces fresh arrivals as “二五六黑” / “五一二白” through Mac mini Speakers. A background worker coalesces repeats without blocking inventory polling or changing Telegram/Mac forwarding.
