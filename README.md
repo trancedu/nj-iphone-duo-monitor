@@ -21,6 +21,8 @@ The [bounded hybrid fallback](docs/hybrid-dataimpulse.md) can use DataImpulse on
 
 See the [2s / 1.5s / 1s DataImpulse cadence comparison](docs/dataimpulse-cadence-2026-10-27.md) for the finite isolated experiment and its response-time, gap and traffic tradeoffs.
 
+The [bounded concurrency tradeoff review](docs/concurrency-tradeoff-2026-10-27.md) evaluates two different configurations preparing in parallel with one manual handoff. It is an analysis proposal; strict first-arrival execution remains selected.
+
 For a timing budget and limitations of the pickup-page standby path versus manual iPhone checkout, see the [frontend latency review](docs/frontend-latency-review-2026-10-27.md). The estimates are not current-path benchmark results.
 
 ## Mac mini voice alerts
