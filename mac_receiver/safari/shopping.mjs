@@ -5,12 +5,13 @@ import {readFileSync,mkdirSync,writeFileSync,openSync,closeSync,unlinkSync} from
 import {resolve,dirname,join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {safariDOM} from './dom.mjs';
+import {paymentLifecycleDOM} from './payment.mjs';
 import {handoffActivity} from './idle.mjs';
 import {pickupLocationDOM} from '../pickup_location.mjs';
 import {signalSafari} from './feedback.mjs';
 import {classifyStores,sanitizeObservation} from './diagnostics.mjs';
 import {productURL,expectedProduct,Stop} from '../protocol.mjs';
-import {chooseTimeWindow,validatePickupDetails} from '../pickup_details.mjs';
+import {chooseTimeWindow,validatePickupDetails,pickupDetailsFromEnv} from '../pickup_details.mjs';
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const asString=s=>'"'+s.replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('\n','\\n').replaceAll('\r','\\r')+'"';
 export async function appleScript(source) {
@@ -35,7 +36,7 @@ export class SafariWindow {
   }
   async call(op,args={}) {
     const locationOperation=['locationState','openLocation'].includes(op);
-    const execute=locationOperation?pickupLocationDOM:['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM;
+    const execute=['observePaymentAttempt','paymentFailureState','recoverPaymentFailure','expirePaymentWindow','manualRetryPickup'].includes(op)?paymentLifecycleDOM:locationOperation?pickupLocationDOM:['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM;
     const input=locationOperation?{open:op==='openLocation'}:{op,args};
     const js=`(()=>{const t=performance.now();try{const value=(${execute.toString()})(${JSON.stringify(input)});return JSON.stringify({ok:true,value,dom_ms:performance.now()-t});}catch(e){return JSON.stringify({ok:false,error:e.message});}})()`;
     const bridgeStart=performance.now();
@@ -71,11 +72,17 @@ export async function waitForPickupProgress(fn,{startedAt=Date.now(),stallMs=100
     return null;
   },timeout);
 }
+// Active inventory work accepts this city label; idle preparation verifies ZIP.
+export function activePickupLocationAccepted(location,zip){
+  return location.displayed_zip===zip||(zip==='07094'&&!location.displayed_zip&&/(?:^|,\s*)East Rutherford(?:,?\s+NJ)?$/i.test(location.displayed_location||''));
+}
 // Only the unselected fulfillment page is eligible for standby refresh.
-export async function prepareSafariStandby(window,url,config,{refresh=false,stage=()=>{},sessionContinuationAttempted=false}={}){
+export async function prepareSafariStandby(window,url,config,{refresh=false,stage=()=>{},sessionContinuationAttempted=false,progress,activeRequest=false}={}){
   const product=expectedProduct(url),call=(op,args={})=>window.call(op,{product,...args});
-  const wait=fn=>waitFor(fn,config.step_timeout_ms??20000);
+  const wait=fn=>progress?progress(fn,Date.now()):waitFor(fn,config.step_timeout_ms??20000);
   let state=await call('standbyState');
+  stage(state.abandoned?'standby_entry_abandoned_at':state.expired?'standby_entry_expired_at':state.session_warning?'standby_entry_session_warning_at':state.ready?'standby_entry_ready_at':'standby_entry_unprepared_at');
+  if(config.urgent_same_configuration_retry&&(!state.checkout||state.expired||state.session_warning))throw new Stop('urgent_retry_checkout_not_ready');
   if(state.session_warning){
     if(!sessionContinuationAttempted){
       await call('continueShoppingSession');
@@ -90,18 +97,25 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
       state=await call('standbyState');
     }
   }
-  if((state.abandoned||config.recover_stalled_pickup)&&state.checkout){
+  // The current page is authoritative. An old controller flag must never send a
+  // verified pickup page back through Bag. Only an actually abandoned document
+  // needs one same-page reload to retire old network/Continue state.
+  if(state.abandoned&&state.checkout){
+    const before=state;stage('standby_refresh_requested_at');
     const reset=await call('resetAbandonedPickup');
     if(!reset.reset)throw new Stop('abandoned_checkout_protected');
-    await wait(async()=>{const s=await call('snapshot');return new URL(s.url).pathname==='/shop/bag'&&s.ready==='complete';});
-    state=await call('standbyState');
+    stage('standby_refresh_at');
+    state=await wait(async()=>{const s=await call('standbyState');return s.document_time_origin!==before.document_time_origin&&(s.expired||!s.checkout||s.pickup_ready||s.zip_needed)?s:null;});
+    if(state.pickup_ready)state=await wait(async()=>{const s=await call('armPickupStandby');return s.armed?s:null;});
+    refresh=false; // This is already the event's one refresh; never reload twice.
   }
   if(state.protected)throw new Stop('standby_checkout_protected');
   if(!state.ready){
+    if(config.urgent_same_configuration_retry)throw new Stop('urgent_retry_checkout_not_ready');
     const current=await call('snapshot');
     if(new URL(current.url).pathname!=='/shop/bag')await window.goto('https://www.apple.com/shop/bag');
     await wait(async()=>{const s=await call('snapshot');return s.ready==='complete'&&(s.empty||s.bag.length&&s.bag.every(i=>i.title&&i.quantity));});
-    await prepareSafari(window,url,config,{seedOnly:true,stage});
+    await prepareSafari(window,url,config,{seedOnly:true,stage:(name,detail)=>stage(name==='started_at'?'standby_seed_started_at':name,detail)});
     await wait(async()=>(await call('checkoutReady')).ready);
     await call('checkout');stage('checkout_clicked_at');
   }else if(refresh){
@@ -112,15 +126,19 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
     // the verified quantity-one Bag, never loop on a stale checkout URL.
     if(state.pickup_ready)state=await wait(async()=>{const s=await call('armPickupStandby');return s.armed?s:null;});
     if(state.protected)throw new Stop('standby_checkout_protected');
-    if(!state.ready)return prepareSafariStandby(window,url,config,{stage});
+    if(!state.ready)return prepareSafariStandby(window,url,config,{stage,progress,activeRequest});
   }
   if(!state.pickup_selected)await wait(async()=>(await call('pickup')).ready);
   if(!state.pickup_ready)await wait(async()=>{const s=await call('pickupReady');return s.ready||s.zipNeeded;});
   const location=await call('locationState');
-  if(location.displayed_zip!==config.pickup_zip){
-    stage('pickup_location_correction_started_at');
+  const activeCity=activeRequest&&location.displayed_zip!==config.pickup_zip&&activePickupLocationAccepted(location,config.pickup_zip);
+  if(activeCity)stage('pickup_location_deferred_at',{kind:'pickup_location',phase:'active_request',displayed_location:location.displayed_location,configured_zip:config.pickup_zip,verdict:'location_city_accepted_temporarily'});
+  if(location.displayed_zip!==config.pickup_zip&&!activeCity){
+    stage('pickup_location_correction_started_at',{kind:'pickup_location',phase:'before_editor',displayed_zip:location.displayed_zip,displayed_location:location.displayed_location,configured_zip:config.pickup_zip,verdict:location.displayed_zip?'location_zip_mismatch':'location_zip_unverified'});
     if(!location.editable)await call('openLocation');
     await wait(async()=>(await call('locationState')).editable);
+    const editor=await call('locationState');
+    stage('pickup_location_editor_read_at',{kind:'pickup_location',phase:'editor_read',displayed_zip:editor.displayed_zip,displayed_location:editor.displayed_location,configured_zip:config.pickup_zip,verdict:editor.displayed_zip===config.pickup_zip?'location_zip_already_correct':editor.displayed_zip?'location_zip_mismatch':'location_zip_unverified'});
     await call('zip',{zip:config.pickup_zip});
     await new Promise(r=>setTimeout(r,500));
     await wait(async()=>(await call('pickupReady')).ready);
@@ -134,6 +152,7 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
   return {status:'standby_checkout',product,zip:config.pickup_zip};
 }
 export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>{},shouldYieldToRecent,tryClaimApplePay,mayForeground=()=>true}={}) {
+  config={...config,pickup_details:pickupDetailsFromEnv(config.pickup_details)};
   productURL(url);const product=expectedProduct(url);const call=(op,args={})=>window.call(op,{product,...args});
   const timeout=config.step_timeout_ms??20000;
   if(!Number.isInteger(timeout)||timeout<100||timeout>60000)throw new Stop('invalid_safari_step_timeout');
@@ -141,7 +160,9 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
   stage('started_at');
   const warm=config.standby_page==='pickup_checkout'&&!seedOnly;
   if(warm)validatePickupDetails(config.pickup_details);
-  if(warm)await prepareSafariStandby(window,url,config,{refresh:true,stage});
+  const progressWait=(fn,startedAt)=>waitForPickupProgress(fn,{startedAt,stallMs:(config.stall_handoff_seconds??10)*1000,shouldYield:shouldYieldToRecent,abandon:()=>call('abandonStalledPickup'),stage,timeout});
+  const loadingWait=(fn,startedAt)=>waitForPickupProgress(fn,{startedAt,stallMs:(config.stall_handoff_seconds??10)*1000,shouldYield:shouldYieldToRecent,abandon:async()=>{const retired=await call('abandonLoadingPickup');if(retired.abandoned)stage('pickup_loading_stalled_at');return retired;},stage,timeout});
+  if(warm)await prepareSafariStandby(window,url,config,{refresh:true,stage,progress:loadingWait,activeRequest:true});
   if(!warm){
   let snap=await call('snapshot');
   if(new URL(snap.url).pathname!=='/shop/bag'){await window.goto('https://www.apple.com/shop/bag');snap=await wait(async()=>{const s=await call('snapshot');return s.bag.length||s.empty?s:null;});}
@@ -165,17 +186,18 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
   await call('checkout');stage('checkout_clicked_at');
   }
   const openPickup=async()=>{
-    await wait(async()=>(await call('pickup')).ready);
-    let ready=await wait(async()=>{const s=await call('pickupReady');return s.ready||s.zipNeeded?s:null;});
-    if(ready.zipNeeded){await call('zip',{zip:config.pickup_zip});await wait(async()=>(await call('pickupReady')).ready);}
-    if(config.standby_page==='pickup_checkout')await wait(async()=>{const s=await call('armPickupStandby');return s.armed?s:null;});
+    const readyWait=fn=>loadingWait(fn,Date.now());
+    await readyWait(async()=>(await call('pickup')).ready);
+    let ready=await readyWait(async()=>{const s=await call('pickupReady');return s.ready||s.zipNeeded?s:null;});
+    if(ready.zipNeeded&&!activePickupLocationAccepted(await call('locationState'),config.pickup_zip)){await call('zip',{zip:config.pickup_zip});await readyWait(async()=>(await call('pickupReady')).ready);}
+    if(config.standby_page==='pickup_checkout')await readyWait(async()=>{const s=await call('armPickupStandby');return s.armed?s:null;});
   };
   if(!warm){await openPickup();stage('pickup_page_ready_at');}
   const retries=config.pickup_unavailable_retries??2,interval=config.pickup_retry_interval_ms??1000;
   if(!Number.isInteger(retries)||retries<0||retries>10||!Number.isInteger(interval)||interval<1000||interval>10000)throw new Stop('invalid_pickup_retry_config');
   let lastRead;
   const readStores=async()=>{
-    try{return await wait(async()=>{const r=await call('stores');if(!r.stores.length)return null;lastRead=r;return r.stores;});}
+    try{return await loadingWait(async()=>{const r=await call('stores');if(!r.stores.length)return null;lastRead=r;return r.stores;},Date.now());}
     catch(e){if(e instanceof Stop&&e.code==='safari_step_timeout')throw new Stop('store_list_unrecognized');throw e;}
   };
   const preferred=config.pickup_details.store_name,any=config.pickup_first_available_store!==false||config.test_any_available_store===true;
@@ -192,8 +214,8 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
     if(!any&&!locationChecked&&!check.target&&check.verdict!=='target_store_ambiguous'){
       locationChecked=true;
       const location=await call('locationState');
-      if(location.displayed_zip!==config.pickup_zip){
-        stage('pickup_location_correction_started_at');
+      if(!activePickupLocationAccepted(location,config.pickup_zip)){
+        stage('pickup_location_correction_started_at',{kind:'pickup_location',phase:'before_editor',displayed_zip:location.displayed_zip,displayed_location:location.displayed_location,configured_zip:config.pickup_zip,verdict:location.displayed_zip?'location_zip_mismatch':'location_zip_unverified'});
         await call('openLocation');
         await wait(async()=>(await call('locationState')).editable);
         await call('zip',{zip:config.pickup_zip});
@@ -244,7 +266,6 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
   if(selection.alreadySelected)stage('store_selection_reused_at');
   stage('store_selected_at');
   const timeWaitStart=Date.now();stage('pickup_time_wait_started_at');
-  const progressWait=(fn,startedAt)=>waitForPickupProgress(fn,{startedAt,stallMs:(config.stall_handoff_seconds??10)*1000,shouldYield:shouldYieldToRecent,abandon:()=>call('abandonStalledPickup'),stage,timeout:config.step_timeout_ms??20000});
   const available=await progressWait(async()=>{const r=await call('dates');return r.dates.some(d=>d.enabled)?r:null;},timeWaitStart);
   const date=available.dates.find(d=>d.enabled&&d.checked)||available.dates.find(d=>d.enabled);
   if(!date.checked)await progressWait(async()=>(await call('selectDate',{name:date.name})).selected,timeWaitStart);
@@ -272,6 +293,10 @@ export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>
   if(config.handoff_idle_timeout_seconds>0&&config.handoff_event_id){const idle=await call('armIdle',{event_id:config.handoff_event_id});if(['tracking','payment_started'].includes(idle.status))stage('handoff_idle_armed_at');}
   if(window.onPerformance)window.onPerformance('contact_ready',await call('performanceState'));
   stage('handoff_at');
+  if(config.open_apple_pay_sheet===true){
+    const observer=await call('observePaymentAttempt',{event_id:config.handoff_event_id||'isolated-test'});
+    stage(observer.installed?'payment_observer_armed_at':'payment_observer_unavailable_at');
+  }
   const clickApplePay=config.open_apple_pay_sheet===true&&(!tryClaimApplePay||tryClaimApplePay());
   if(mayForeground())await window.foreground();
   if(clickApplePay){

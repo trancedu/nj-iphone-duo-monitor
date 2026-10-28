@@ -8,6 +8,7 @@ export function sanitizeObservation(input={}) {
     requested_store_name:text(input.requested_store_name),requested_store_id:text(input.requested_store_id,40),
     page:{origin:origin&&/^https:\/\/(?:www\.apple\.com|secure\d*\.store\.apple\.com)$/.test(origin)?origin:null,path:['/shop/apw/checkout','/shop/bag'].includes(path)?path:null,state:['Fulfillment-init','PickupContact-init'].includes(page.state)?page.state:null},
     displayed_zip:/^\d{5}$/.test(input.displayed_zip||'')?input.displayed_zip:null,
+    displayed_location:text(input.displayed_location,100),
     configured_zip:/^\d{5}$/.test(input.configured_zip||'')?input.configured_zip:null,
     verdict:code(input.verdict),error_code:code(input.error_code),expansion_available:typeof input.expansion_available==='boolean'?input.expansion_available:null,
     stores:Array.isArray(input.stores)?input.stores.slice(0,40).map(s=>({name:text(s.name),store_id:text(s.store_id,40),availability_text:text(s.availability_text,80),enabled:s.enabled===true,visible:typeof s.visible==='boolean'?s.visible:null})):[]};

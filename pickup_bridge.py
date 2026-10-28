@@ -44,6 +44,15 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def endpoint_config(config, environ=None):
+    """Override transport only; Bridge still validates private IP, path and auth."""
+    result = dict(config)
+    override = (os.environ if environ is None else environ).get('PICKUP_MAC_ENDPOINT', '').strip()
+    if override:
+        result['endpoint'] = override
+    return result
+
+
 class Bridge:
     def __init__(self, config, secret, runtime, notify, autostart=True):
         u = urllib.parse.urlsplit(config['endpoint'])
@@ -71,6 +80,7 @@ class Bridge:
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.incoming = queue.Queue(maxsize=128)
         self.stop = threading.Event()
+        self.wake = threading.Event()
         if autostart:
             threading.Thread(target=self.run, name='pickup-lan-outbox', daemon=True).start()
 
@@ -93,6 +103,7 @@ class Bridge:
             return False
         try:
             self.incoming.put_nowait(dict(offer))
+            self.wake.set()
             return True
         except queue.Full:
             LOG.error('bridge_queue_full')
@@ -108,6 +119,8 @@ class Bridge:
             payload = {'event_id': event_id, 'detected_at': offer['observed_at'], 'product_url': offer['url'],
                        'store_id': offer.get('store_id'), 'store_name': offer.get('store'),
                        'pickup_zip': offer.get('pickup_zip')}
+            if offer.get('simulation_no_payment') is True:
+                payload['simulation_no_payment'] = True
             c.execute('INSERT INTO events VALUES (?,?,?,?,?,?,?,?,?)',
                       (event_id, dedup, now, json.dumps(payload), 'pending', 0, now, now+180, ''))
         self.log(event_id, phase='queued', detected_at=payload['detected_at'])
@@ -159,6 +172,7 @@ class Bridge:
             return
         method = 'POST' if phase == 'pending' else 'GET'
         self.log(event_id, phase='sending' if phase == 'pending' else 'status_check', method=method)
+        request_started = time.monotonic()
         try:
             code, reply = self.request(method, event_id, json.loads(body) if phase == 'pending' else None)
             status = reply.get('status', 'invalid_response')
@@ -185,18 +199,20 @@ class Bridge:
             c.execute('UPDATE events SET phase=?,attempts=0,due=?,result=? WHERE id=?', (new_phase, now+5, outcome, event_id))
         # Only stage timestamps and status are retained, never arbitrary response/error text.
         timestamps = {k:v for k,v in reply.get('timestamps', {}).items() if k in
-                      ('received_at','opened_at','bag_ready_at','apple_pay_at','handoff_at','finished_at') and isinstance(v,str)}
-        self.log(event_id, phase='received', receiver_status=outcome, timestamps=timestamps)
+                      ('received_at','execution_started_at','started_at','standby_refresh_requested_at','standby_refresh_at','pickup_page_ready_at','store_selected_at','time_selected_at','contact_verified_at','apple_pay_button_clicked_at','opened_at','bag_ready_at','apple_pay_at','handoff_at','finished_at') and isinstance(v,str)}
+        self.log(event_id, phase='received', receiver_status=outcome, timestamps=timestamps, request_ms=round((time.monotonic()-request_started)*1000,3))
         if outcome in ('busy','manual_review','pickup_unavailable','interrupted','receiver_timeout','browser_not_ready','expired','queue_full'):
             self.warning(event_id, outcome, now)
 
     def run(self):
         while not self.stop.is_set():
+            # Clear before draining: submissions during/after tick wake the wait.
+            self.wake.clear()
             try:
                 self.tick()
             except Exception:
                 LOG.error('bridge_worker_error')
-            self.stop.wait(.1)
+            self.wake.wait(.1)
 
 
 _instances = {}
@@ -210,9 +226,10 @@ def enqueue_confirmed_offer(offer, runtime, notify):
         return False
     try:
         with _guard:
-            key = (str(runtime), path)
+            override = os.environ.get('PICKUP_MAC_ENDPOINT', '').strip()
+            key = (str(runtime), path, override)
             if key not in _instances:
-                config = json.loads(Path(path).read_text())
+                config = endpoint_config(json.loads(Path(path).read_text()))
                 _instances[key] = Bridge(config, os.environ.get(config.get('secret_env', 'PICKUP_SHARED_SECRET'), ''), runtime, notify) if config.get('enabled') else None
             bridge = _instances[key]
         return bridge.submit(offer) if bridge else False

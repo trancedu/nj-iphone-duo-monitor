@@ -49,3 +49,7 @@ work window requires reopening the same profile before automatic close-release
 can restore its cart. Safari quitting does not release active locks. Local reset
 restores the correct bag before releasing held work. The final Apple Pay button
 is always left for the user.
+
+## 发布回归
+
+Safari 页面/恢复改动发布前运行 `npm --prefix mac_receiver run test:release`，再使用独立 iPhone 18 测试窗口运行共享流程的真实回归，部署后只读核对六个窗口与源码版本。具体命令、证据边界和紧急修复例外见 [Safari 发布回归规则](../docs/safari-release-regression.md)。测试入口 `safari/regression.mjs` 强制不点击最终 Apple Pay；生产配置不变。

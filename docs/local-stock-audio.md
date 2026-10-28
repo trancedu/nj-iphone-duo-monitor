@@ -53,3 +53,23 @@ LaunchAgent: `~/Library/LaunchAgents/com.trancedu.iphone-duo-local-audio.plist` 
 
 
 2026-10-28：增加两种颜色的1TB语音映射。与原四款共用独立队列和去重策略；2TB仍不播报。模拟测试必须带“测试”前缀，不向真实到货日志或Mac前端注入伪库存。
+
+
+## MacBook deployment (2026-10-28)
+
+本机已启用同一独立进程及线程队列，不修改库存循环或浏览器转发。设备配置保存在
+`~/.config/iphone-duo/local-stock-audio.json`，audio_device 为 `MacBook Pro Speakers`，
+Tingting、rate=300、max_age_seconds=10。Mini原配置文件保持可复用。
+
+```sh
+python3 deploy/local_audio_service.py install --config "$HOME/.config/iphone-duo/local-stock-audio.json"
+python3 deploy/local_audio_service.py status
+```
+
+新消息约每100ms扫描一次既有日志，提交用put_nowait，独立线程执行say子进程；
+慢播报、设备失败不会阻塞查询、Telegram或Safari。队列最多8条，超过10秒的排队提示丢弃，
+同一库存episode只播一次，启动跳过历史。当前支持256白/黑、512白/黑、1T白/黑。
+
+验收：5个语音测试通过，含慢play仍不阻塞submit、去重/新episode、跳过历史/半行及
+显式音频设备；实际执行一次“测试。二五六白，五一二黑。”命令返回成功。
+这不等于确认用户听到；音量与静音状态未改动。安装语音服务前后库存PID54409保持不变。

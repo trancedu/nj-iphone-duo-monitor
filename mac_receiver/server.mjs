@@ -24,7 +24,7 @@ export function createReceiver(config,browser,secret,suppliedEngine=null) {
         const item=engine.state.events[url.pathname.slice(8)];
         return item?send(200,engine.public(item)):send(404,{status:'not_found'});
       }
-      if(req.method!=='POST'||!['/prepare','/reset'].includes(url.pathname)) return send(404,{status:'not_found'});
+      if(req.method!=='POST'||!['/prepare','/reset','/retry'].includes(url.pathname)) return send(404,{status:'not_found'});
       if(!/^application\/json(?:;|$)/i.test(req.headers['content-type']||'')) return send(415,{status:'json_required'});
       let body='';
       for await(const chunk of req) {
@@ -32,6 +32,12 @@ export function createReceiver(config,browser,secret,suppliedEngine=null) {
         if(Buffer.byteLength(body)>8192) return send(413,{status:'body_too_large'});
       }
       let raw;try {raw=JSON.parse(body);} catch {return send(400,{status:'invalid_json'});}
+      if(url.pathname==='/retry') {
+        if(!['127.0.0.1','::1'].includes(normalizeIP(req.socket.remoteAddress)))return send(403,{status:'local_retry_only'});
+        if(raw?.confirm!==true||!['A','B','C','D','E','F'].includes(raw.profile_label)||!Object.hasOwn(raw,'expected_event_id')||!(raw.expected_event_id===null||typeof raw.expected_event_id==='string')||typeof raw.restore_only!=='boolean')return send(400,{status:'explicit_retry_required'});
+        if(!engine.manualRetry)return send(400,{status:'manual_retry_unsupported'});
+        return send(202,engine.manualRetry(raw));
+      }
       if(url.pathname==='/reset') {
         if(!['127.0.0.1','::1'].includes(normalizeIP(req.socket.remoteAddress))) return send(403,{status:'local_reset_only'});
         if(raw?.confirm!==true||typeof raw.event_id!=='string') return send(400,{status:'explicit_reset_required'});
@@ -44,7 +50,7 @@ export function createReceiver(config,browser,secret,suppliedEngine=null) {
       }
       const result=engine.accept(event);return send(result.code,result.body);
     } catch(error) {
-      return send(error instanceof Stop&&error.code==='task_still_running'?409:400,
+      return send(error instanceof Stop&&['task_still_running','retry_owner_changed'].includes(error.code)?409:400,
           {status:error instanceof Stop?error.code:'request_failed'});
     }
   });

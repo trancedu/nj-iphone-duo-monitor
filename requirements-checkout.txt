@@ -1,0 +1,2 @@
+# Optional browser rehearsal only; inventory monitoring remains standard-library.
+playwright>=1.40,<2

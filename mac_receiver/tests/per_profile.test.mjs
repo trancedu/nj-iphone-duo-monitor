@@ -89,3 +89,121 @@ test('per-configuration deadlines do not require or launch the process-wide unlo
  assert.doesNotThrow(()=>validateTimeoutPolicy({per_profile_requests:true,single_active_request:false,global_lock_timeout_seconds:60}));
  assert.throws(()=>validateTimeoutPolicy({single_active_request:false,global_lock_timeout_seconds:60}),e=>e.code==='global_timeout_helper_required');
 });
+test('only a fresh same-configuration successor after a stall receives urgent retry mode',async t=>{
+ const f=fixture(t);f.router.accept(f.event('old'));await turn();
+ f.router.accept(f.event('next'));f.router.accept(f.event('other',1));await turn();
+ f.slots[0].browser.stalledProfilePending=true;
+ f.pending.get('old').bad(new Stop('pickup_stalled_yield'));await delay(140);await turn();
+ assert.equal(f.slots[0].engine.state.events.next.same_configuration_stall_retry,true);
+ assert.equal(f.slots[1].engine.state.events.other.same_configuration_stall_retry,undefined);
+ assert.equal(f.slots[0].engine.state.active,'next');
+});
+test('fresh same-configuration candidate takes priority over standby maintenance',async t=>{
+ const f=fixture(t);let maintained=0;
+ f.slots[0].browser.refreshStandby=()=>{maintained++;return null;};
+ f.router.accept(f.event('old'));await turn();f.router.accept(f.event('next'));
+ f.slots[0].engine.state.active=null;f.slots[0].browser.stalledProfilePending=true;
+ await f.router.maintainStandby();await turn();
+ assert.equal(maintained,0);assert.equal(f.slots[0].engine.state.active,'next');
+ assert.equal(f.slots[0].engine.state.events.next.same_configuration_stall_retry,true);
+});
+test('T+0 stalled loading hands to T+3 same SKU at T+10 while T+5 other SKU stays independent',async t=>{
+ const f=fixture(t);const base=Date.now();let logical=0;
+ const original=f.slots[0].browser.prepare;
+ f.slots[0].browser.prepare=async event=>{
+  if(event.event_id!=='loading-old')return original(event);
+  try{await waitForPickupProgress(async()=>false,{startedAt:0,now:()=>logical,stallMs:10000,timeout:1000,shouldYield:()=>true,abandon:async()=>({abandoned:true})});}
+  catch(e){f.slots[0].browser.stalledProfilePending=true;throw e;}
+ };
+ f.router.accept(f.event('loading-old'));await turn();
+ logical=3000;f.router.accept(f.event('loading-new'));
+ const next=f.slots[0].engine.state.events['loading-new'];next.detected_at=new Date(base+3000).toISOString();next.timestamps.received_at=next.detected_at;
+ logical=5000;f.router.accept(f.event('other-SKU',1));await turn();
+ logical=10000;f.router.expireWaiting(base+10000);assert.equal(next.status,'global_waiting');
+ await delay(260);await turn();
+ assert.equal(f.slots[0].engine.state.events['loading-old'].reason,'pickup_stalled_yield');
+ assert.equal(f.slots[0].engine.state.active,'loading-new');assert.equal(next.same_configuration_stall_retry,true);
+ assert.equal(f.slots[1].engine.state.active,'other-SKU');
+});
+
+test('payment cooldown blocks all claims for 10 seconds, then allows a new request without replay',async t=>{
+ const f=fixture(t);
+ assert.equal(f.slots[0].browser.tryClaimApplePay('first'),true);
+ const claimed=Date.parse(f.router.paymentClaimedAt);
+ assert.equal(f.slots[0].browser.tryClaimApplePay('first'),false);
+ f.router.expirePaymentLease(claimed+9999);
+ assert.equal(f.slots[1].browser.tryClaimApplePay('second'),false);
+ f.router.expirePaymentLease(claimed+10000);
+ assert.equal(f.router.paymentOwner,null);
+ assert.deepEqual(f.calls,[]);
+ assert.equal(f.slots[1].browser.tryClaimApplePay('new'),true);
+ assert.equal(f.router.paymentOwner,'new');
+});
+test('payment cooldown survives router restart even when request is no longer active',t=>{
+ const f=fixture(t);f.slots[0].browser.tryClaimApplePay('first');
+ const restored=new ProfileRouter(f.router.config,f.slots);
+ assert.equal(restored.paymentOwner,'first');
+ assert.equal(f.slots[1].browser.tryClaimApplePay('second'),false);
+ restored.expirePaymentLease(Date.parse(restored.paymentClaimedAt)+10000);
+ const expired=new ProfileRouter(f.router.config,f.slots);
+ assert.equal(expired.paymentOwner,null);
+});
+test('payment deadline restores once, then dispatches newest fresh same-SKU candidate',async t=>{
+ const f=fixture(t);f.router.accept(f.event('white'));await turn();f.pending.get('white').ok();await turn();await turn();
+ const e=f.slots[0].engine;let restore=0,finish;
+ f.slots[0].browser.expirePaymentWindow=async()=>{restore++;await new Promise(r=>finish=r);};
+ e.stage(e.state.events.white,'apple_pay_sheet_requested_at');t.after(()=>clearTimeout(e.paymentDeadlineTimer));
+ f.router.accept(f.event('older'));e.state.events.older.timestamps.received_at=new Date(Date.now()-100).toISOString();f.router.accept(f.event('latest'));
+ const task=e.watchPaymentDeadline(Date.parse(e.state.events.white.timestamps.apple_pay_sheet_requested_at)+10000);
+ assert.equal(e.state.active,null);await delay(140);assert.deepEqual(f.calls,['white']);
+ finish();await task;await delay(140);assert.deepEqual(f.calls,['white','latest']);assert.equal(restore,1);
+ assert.equal(e.state.events.older.status,'global_waiting');
+});
+test('confirmed failed payment actively rechecks once when no fresh signal exists',async t=>{
+ const f=fixture(t);f.router.accept(f.event('white'));await turn();f.pending.get('white').ok();await turn();await turn();
+ const e=f.slots[0].engine;e.state.events.white.timestamps.apple_pay_sheet_requested_at=new Date().toISOString();
+ f.slots[0].browser.inspectPaymentFailure=async()=>({outcome:'failed',recoverable:true,observed:true,closed:true,phase:'payment_failed'});
+ f.slots[0].browser.recoverPaymentFailure=async()=>{};
+ f.slots[0].browser.tryClaimApplePay('white');
+ assert.equal(await e.watchPaymentFailure(),true);assert.equal(f.router.paymentOwner,null);
+ await delay(140);assert.equal(f.calls.length,2);const retry=e.state.events[e.state.active];
+ assert.equal(retry.payment_failure_retry_of,'white');assert.equal(retry.payment_failure_retry_count,1);
+ // A repeated failure in this local recheck does not create an infinite loop.
+ f.pending.get(retry.event_id).ok();await turn();await turn();retry.timestamps.apple_pay_sheet_requested_at=new Date().toISOString();
+ e.nextPaymentPoll=0;assert.equal(await e.watchPaymentFailure(),true);await delay(140);assert.equal(f.calls.length,2);assert.equal(e.state.active,null);
+});
+test('confirmed failure prefers a fresh signal, and a new signal cancels a queued local recheck',async t=>{
+ const f=fixture(t);f.router.accept(f.event('white'));await turn();f.pending.get('white').ok();await turn();await turn();
+ const e=f.slots[0].engine;e.state.events.white.timestamps.apple_pay_sheet_requested_at=new Date().toISOString();
+ f.slots[0].browser.inspectPaymentFailure=async()=>({outcome:'failed',recoverable:true});f.slots[0].browser.recoverPaymentFailure=async()=>{};
+ f.router.accept(f.event('fresh'));await e.watchPaymentFailure();await delay(140);assert.deepEqual(f.calls,['white','fresh']);
+ assert.equal(Object.values(e.state.events).some(i=>i.payment_failure_retry_of),false);
+ // Queue the local fallback after another failure, then supersede it before dispatch.
+ f.pending.get('fresh').ok();await turn();await turn();e.state.events.fresh.timestamps.apple_pay_sheet_requested_at=new Date().toISOString();e.nextPaymentPoll=0;
+ await e.watchPaymentFailure();const fallback=Object.values(e.state.events).find(i=>i.payment_failure_retry_of);
+ f.router.accept(f.event('brand-new'));await delay(140);assert.deepEqual(f.calls,['white','fresh','brand-new']);assert.equal(fallback.status,'expired');
+});
+test('manual restore handles one profile only and preserves another profile payment owner',async t=>{
+ const f=fixture(t);let restored=0;f.slots[0].browser.manualRetryToPickup=async()=>restored++;
+ f.slots[1].browser.tryClaimApplePay('black-payment');
+ const result=f.router.manualRetry({profile_label:'A',expected_event_id:null,restore_only:true});
+ await turn();await turn();assert.equal(restored,1);assert.deepEqual(f.calls,[]);assert.equal(f.slots[0].engine.state.active,null);
+ assert.equal(f.slots[0].engine.state.events[result.event_id].status,'manual_retry_ready');assert.equal(f.router.paymentOwner,'black-payment');
+});
+test('manual retry waits for old runner, deduplicates preparation, and does not interrupt another SKU',async t=>{
+ const f=fixture(t);f.router.accept(f.event('white'));f.router.accept(f.event('black',1));await turn();let restores=0;
+ f.slots[0].browser.manualRetryToPickup=async()=>{restores++;assert.notEqual(f.slots[0].engine.state.events.white.status,'running');};
+ const a=f.router.manualRetry({profile_label:'A',expected_event_id:'white',restore_only:false});
+ const b=f.router.manualRetry({profile_label:'A',expected_event_id:'white',restore_only:false});assert.equal(a.event_id,b.event_id);
+ await turn();assert.equal(restores,0);assert.equal(f.slots[0].browser.abortEventId,'white');
+ f.pending.get('white').bad(new Stop('pickup_task_deadline'));await delay(160);await turn();
+ assert.equal(restores,1);assert.deepEqual(f.calls,['white','black',a.event_id]);assert.equal(f.slots[1].engine.state.active,'black');
+});
+test('manual retry refuses stale ownership and reports failed restore without starting checkout',async t=>{
+ const f=fixture(t);f.router.accept(f.event('white'));await turn();
+ assert.throws(()=>f.router.manualRetry({profile_label:'A',expected_event_id:null,restore_only:false}),e=>e.code==='retry_owner_changed');
+ f.pending.get('white').ok();await turn();await turn();
+ f.slots[0].browser.manualRetryToPickup=async()=>{throw new Stop('manual_retry_pickup_not_ready');};
+ const retry=f.router.manualRetry({profile_label:'A',expected_event_id:'white',restore_only:false});await turn();await turn();
+ assert.deepEqual(f.calls,['white']);assert.equal(f.slots[0].engine.state.active,null);assert.equal(f.slots[0].engine.state.events[retry.event_id].status,'manual_review');
+});

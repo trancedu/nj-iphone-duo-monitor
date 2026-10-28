@@ -17,3 +17,11 @@ test('ambiguous location controls stop rather than click an arbitrary ZIP',async
  const b=await chromium.launch({channel:'chrome',headless:true});t.after(()=>b.close());const p=await b.newPage();await p.route('**/*',r=>r.fulfill({body:'<button>10001</button><button>10002</button>'}));await p.goto('https://secure7.store.apple.com/shop/apw/checkout');
  await assert.rejects(()=>p.evaluate(pickupLocationDOM,{open:true}),/pickup_location_ambiguous/);
 });
+test('city label remains unverified and is recorded rather than guessed as ZIP 07094',async t=>{
+ const b=await chromium.launch({channel:'chrome',headless:true});t.after(()=>b.close());const p=await b.newPage();
+ await p.route('**/*',r=>r.fulfill({body:'<button aria-label="Edit Zip Code or City, State, East Rutherford, NJ">East Rutherford, NJ</button>'}));
+ await p.goto('https://secure7.store.apple.com/shop/apw/checkout');
+ const state=await p.evaluate(pickupLocationDOM,{});
+ assert.equal(state.displayed_zip,null);assert.match(state.displayed_location,/East Rutherford/);
+ assert.equal(state.editor_available,true);
+});

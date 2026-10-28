@@ -16,6 +16,22 @@ export async function checkPickupRadio(page,radio) {
   if(!await radio.isChecked())throw new Stop('pickup_radio_not_selected');
 }
 
+export function pickupDetailsFromEnv(config={},env=process.env){
+  const result={...config};
+  const names={first_name:'APPLE_PICKUP_FIRST_NAME',last_name:'APPLE_PICKUP_LAST_NAME',email:'APPLE_PICKUP_EMAIL',phone:'APPLE_PICKUP_PHONE'};
+  for(const [key,name] of Object.entries(names)){
+    if(env[name]===undefined)continue;
+    if(typeof env[name]!=='string'||!env[name].trim())throw new Stop('pickup_contact_environment_invalid');
+    result[key]=env[name].trim();
+    if(key==='phone'){
+      result[key]=result[key].replace(/[\s()+.-]/g,'');
+      if(result[key].length===11&&result[key].startsWith('1'))result[key]=result[key].slice(1);
+    }
+    if((['first_name','last_name'].includes(key)&&result[key].length>200)||(key==='email'&&!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(result[key]))||(key==='phone'&&!/^\d{10}$/.test(result[key])))throw new Stop('pickup_contact_environment_invalid');
+  }
+  return result;
+}
+
 export function validatePickupDetails(c) {
   for(const key of ['store_name','first_name','last_name']) if(typeof c[key]!=='string'||!c[key].trim()||c[key].length>200) throw new Stop('pickup_contact_config_required');
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(c.email||'')||!/^\d{10}$/.test(c.phone||'')) throw new Stop('pickup_contact_config_required');
@@ -49,7 +65,7 @@ export function chooseTimeWindow(options,dateLabel,c,now=new Date()) {
 }
 
 export async function preparePickupDetails(browser,stage,now=new Date()) {
-  const c=browser.config.pickup_details;validatePickupDetails(c);
+  const c=pickupDetailsFromEnv(browser.config.pickup_details);validatePickupDetails(c);
   const page=browser.page;
   await browser.guard();
   const list=page.locator(browser.config.selectors.store_list);

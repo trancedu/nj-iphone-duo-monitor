@@ -168,3 +168,13 @@ test('receiver admits Tailscale transport addresses without accepting public add
  for(const ip of ['100.64.0.0','100.103.212.49','100.83.108.82','100.127.255.255','192.168.31.35'])assert.equal(privateIPv4(ip),true,ip);
  for(const ip of ['100.63.255.255','100.128.0.0','8.8.8.8','0.0.0.0','::1'])assert.equal(privateIPv4(ip),false,ip);
 });
+test('local manual retry requires explicit typed selection, authentication, and no browser origin',async t=>{
+ const h=await harness(t);let calls=0;h.engine.manualRetry=raw=>{calls++;return {status:'manual_retry_preparing',event_id:'manual-one',profile_label:raw.profile_label};};
+ const body={confirm:true,profile_label:'B',expected_event_id:null,restore_only:false};
+ assert.equal((await h.request('/retry',body,'bad')).code,401);
+ assert.equal((await h.request('/retry',{...body,confirm:false})).code,400);
+ assert.equal((await h.request('/retry',{...body,profile_label:'all'})).code,400);
+ assert.equal((await h.request('/retry',{confirm:true,profile_label:'B',restore_only:false})).code,400);
+ const result=await h.request('/retry',body);assert.equal(result.code,202);assert.equal(result.body.event_id,'manual-one');assert.equal(calls,1);
+ h.engine.manualRetry=()=>{throw new Stop('retry_owner_changed');};assert.equal((await h.request('/retry',body)).code,409);
+});

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Speak fresh confirmed stock observations on the Mini, without changing polling."""
+"""Speak fresh confirmed stock observations on this Mac, without changing polling."""
 import argparse
 import datetime as dt
 import fcntl
@@ -50,7 +50,7 @@ class Speaker:
         except (OSError, ValueError):
             self.sent = {}
         self.played = dict(self.sent)
-        self.worker = threading.Thread(target=self.run, name='mini-stock-speech', daemon=True)
+        self.worker = threading.Thread(target=self.run, name='stock-speech', daemon=True)
         self.worker.start()
 
     def submit(self, offer):
@@ -138,7 +138,7 @@ def main():
     config = json.loads(args.config.read_text())
     config['rate'] = max(180, min(400, int(config['rate'])))
     if args.test:
-        speak('测试。二五六黑，五一二白。', config)
+        speak('测试。二五六白，五一二黑。', config)
         return
     work = ROOT/'runtime/local-stock-audio'
     work.mkdir(parents=True, exist_ok=True, mode=0o700)

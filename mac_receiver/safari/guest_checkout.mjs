@@ -1,0 +1,399 @@
+// Guest credit checkout experiment. CLI is test-only: Continue to review is
+// allowed, but Place Your Order is available only to the explicit production API.
+import {readFileSync,writeFileSync,mkdirSync,openSync,closeSync,unlinkSync} from 'node:fs';
+import {resolve} from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {SafariWindow,listSafariWindows,appleScript,prepareSafariStandby,prepareSafari,waitFor} from './shopping.mjs';
+import {testConfig} from './regression.mjs';
+import {expectedProduct} from '../protocol.mjs';
+import {safariDOM} from './dom.mjs';
+import {pickupDetailsFromEnv} from '../pickup_details.mjs';
+export const testURL='https://www.apple.com/shop/buy-iphone/iphone-18-pro/6.3-inch-display-256gb-burgundy-unlocked';
+export const sampleBilling={first_name:'Test',last_name:'Example',street:'1 Example Street',street2:'',zip:'07094',city:'Secaucus',state:'NJ'};
+export function readGuestCard(env=process.env){
+ const supplied=['APPLE_GUEST_CARD_NUMBER','APPLE_GUEST_CARD_EXPIRY','APPLE_GUEST_CARD_CVV'].map(k=>env[k]);
+ if(supplied.every(v=>v===undefined))return {number:'0000000000000000',expiry:'1230',cvv:'000'};
+ if(supplied.some(v=>typeof v!=='string'||!v.trim()))throw Error('incomplete_guest_card_environment');
+ const [number,expiry,cvv]=[supplied[0].replace(/[ -]/g,''),supplied[1].replace('/',''),supplied[2]];
+ if(!/^\d{13,19}$/.test(number)||!/^\d{4}$/.test(expiry)||+expiry.slice(0,2)<1||+expiry.slice(0,2)>12||!/^\d{3,4}$/.test(cvv))throw Error('invalid_guest_card_environment');
+ return {number,expiry,cvv};
+}
+export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',expiry:'1230',cvv:'000'},mode='test',expected_product='',max_total_usd=0}){
+ const visible=e=>!!e&&!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden';
+ const norm=s=>(s||'').replace(/\s+/g,' ').trim();
+ const u=new URL(location.href),step=u.searchParams.get('_s');
+ if(u.protocol!=='https:'||!(u.hostname==='www.apple.com'||/^secure\d*\.store\.apple\.com$/.test(u.hostname)))throw Error('unexpected_guest_host');
+ const button=(id,text)=>{const e=document.getElementById(id);if(!visible(e)||e.disabled||norm(e.innerText)!==text)throw Error('guest_control_not_ready');return e;};
+ if(op==='state')return {path:u.pathname,step,document_time_origin:performance.timeOrigin,complete:document.readyState==='complete',guest:visible(document.getElementById('signIn.guestLogin.guestLogin'))&&typeof document.getElementById('signIn.guestLogin.guestLogin').onclick==='function'};
+ if(op==='bagReady'){
+  const b=document.getElementById('shoppingCart.actions.checkoutOtherPayments');
+  return {ready:u.pathname==='/shop/bag'&&document.readyState==='complete'&&visible(b)&&!b.disabled&&typeof b.onclick==='function'&&performance.now()>=750,origin:performance.timeOrigin};
+ }
+ if(op==='bagCheckout'){
+  if(u.hostname!=='www.apple.com'||u.pathname!=='/shop/bag')throw Error('test_bag_required');
+  const items=[...document.querySelectorAll('[role=listitem][data-autom^="bag-item-"]')];
+  if(items.length!==1||!expected_product||norm(items[0].querySelector('h2,h3')?.textContent)!==expected_product||items[0].querySelector('select')?.value!=='1')throw Error('one_test_iphone_required');
+  const b=button('shoppingCart.actions.checkoutOtherPayments','Check Out');
+  if(window.__duoGuestCheckoutRequested)throw Error('guest_checkout_already_requested');
+  window.__duoGuestCheckoutRequested=true;b.click();return {clicked:true};
+ }
+ if(op==='guestContinue'){
+  if(u.pathname!=='/shop/signIn')throw Error('guest_signin_page_required');
+  const b=button('signIn.guestLogin.guestLogin','Continue as Guest');
+  if(window.__duoGuestContinueRequested)throw Error('guest_continue_already_requested');
+  window.__duoGuestContinueRequested=true;b.click();return {clicked:true};
+ }
+ if(u.pathname!=='/shop/checkout'||!/^secure\d*\.store\.apple\.com$/.test(u.hostname))throw Error('guest_checkout_path_required');
+ if(op==='contactReady'||op==='continuePayment'){
+  if(step!=='PickupContact-init')return {ready:false};
+  const e=document.getElementById('rs-checkout-continue-button-bottom');
+  const ready=visible(e)&&!e.disabled&&['Continue to Payment','Continue'].includes(norm(e.innerText))&&[...document.querySelectorAll('h1,h2')].some(h=>norm(h.textContent)==='Now fill out your pickup information.')&&['firstName','lastName','emailAddress','fullDaytimePhone'].every(name=>[...document.querySelectorAll('input')].some(i=>i.name===name&&visible(i)));
+  if(op==='contactReady')return {ready};
+  if(!ready)throw Error('guest_contact_not_ready');
+  if(window.__duoGuestPaymentContinue)throw Error('guest_payment_continue_already_requested');
+  window.__duoGuestPaymentContinue=true;e.click();return {clicked:true};
+ }
+ const orderButtons=()=>[...document.querySelectorAll('button,input[type="submit"]')].filter(e=>visible(e)&&e.id==='rs-checkout-continue-button-bottom'&&e.getAttribute('data-autom')==='continue-button-placeOrder'&&/^Place (?:Your )?Order$/i.test(norm(e.innerText||e.value)));
+ if(op==='reviewState'||op==='verifySavedReview'||op==='editSavedBilling'||op==='placeOrder'){
+  const buttons=orderButtons();
+  const review=['Review','Review-init'].includes(step)&&[...document.querySelectorAll('h1,h2')].some(e=>visible(e)&&/review|ready to (?:place your )?order/i.test(norm(e.textContent)));
+  const ready=review&&buttons.length===1&&!buttons[0].disabled;
+  if(op==='reviewState')return {ready,step,place_order_button_visible:buttons.length===1,payment_submitted:false};
+  if(op==='verifySavedReview'){
+   const section=document.querySelector('.rs-review-billing');
+   const text=norm(section?.innerText).toLowerCase();
+   const checks={card_last4_matches:!!card.number&&text.includes(card.number.slice(-4)),name_matches:text.includes(norm(billing.first_name+' '+billing.last_name).toLowerCase()),street_matches:!!billing.street&&text.includes(billing.street.toLowerCase()),zip_matches:!!billing.zip&&text.includes(billing.zip),city_matches:!!billing.city&&text.includes(billing.city.toLowerCase()),state_matches:!!billing.state&&new RegExp('(?:^|[^a-z])'+billing.state.toLowerCase()+'(?:$|[^a-z])').test(text),unit_matches:!billing.street2||text.includes(billing.street2.toLowerCase())};
+   return {ready:ready&&!!section&&Object.values(checks).every(Boolean),checks,payment_details_reused:true,payment_submitted:false};
+  }
+  if(op==='editSavedBilling'){
+   if(!ready)throw Error('order_review_not_verified');
+   const e=button('checkout.review.billingReview.edit','Change');
+   if(window.__duoGuestEditBillingRequested)throw Error('saved_billing_edit_already_requested');
+   window.__duoGuestEditBillingRequested=true;e.click();return {clicked:true};
+  }
+  if(mode!=='production')throw Error('place_order_forbidden_in_test');
+  if(!ready)throw Error('order_review_not_verified');
+  if(!expected_product||!norm(document.body.innerText).includes(expected_product))throw Error('review_product_not_verified');
+  // Exact total/quantity evidence is required; do not infer these from a price
+  // elsewhere on the page. Selectors must be verified for the deployed layout.
+  const totals=[...document.querySelectorAll('[data-autom="bagtotalvalue"]')].filter(visible);
+  const items=[...document.querySelectorAll('[data-autom]')].filter(e=>/^bag-item-\d+$/.test(e.getAttribute('data-autom'))&&visible(e));
+  if(items.length!==1||norm(items[0].querySelector('h2,h3')?.textContent)!==expected_product)throw Error('review_product_not_verified');
+  const quantities=items.length===1?[...items[0].querySelectorAll('.rs-quantity-text > span:not(.visuallyhidden)')].filter(visible):[];
+  const total=totals.length===1?Number(norm(totals[0].innerText).replace(/[$,]/g,'')):NaN;
+  if(!Number.isFinite(max_total_usd)||max_total_usd<=0||!Number.isFinite(total)||total<=0||total>max_total_usd||quantities.length!==1||!/^1$/.test(norm(quantities[0].innerText)))throw Error('order_amount_or_quantity_not_verified');
+  const key='duo_guest_order_requested_v1';
+  if(sessionStorage.getItem(key))throw Error('guest_order_already_requested');
+  // Mark before invoking: an uncertain reply is never permission to retry.
+  sessionStorage.setItem(key,JSON.stringify({at:new Date().toISOString(),product:expected_product}));
+  buttons[0].click();return {order_requested:true,order_confirmed:false};
+ }
+ if(op==='billingOutcome'){
+  if(step!=='Billing-init')return {status:'navigating',step};
+  const errors=[...document.querySelectorAll('[role="alert"],.form-message-wrapper,.form-message')].filter(visible).map(e=>norm(e.textContent)).filter(Boolean);
+  return {status:errors.length?'validation_error':'waiting',step,validation_error_count:errors.length};
+ }
+ if(step!=='Billing-init')throw Error('guest_billing_page_required');
+ if(op==='creditReady'){
+  const e=document.getElementById('checkout.billing.billingoptions.credit');
+  // Apple renders SSR controls before React attaches their handlers. Clicking
+  // then can briefly check a radio which hydration silently resets.
+  const hydrated=!!e&&Object.keys(e).some(k=>k.startsWith('__reactProps$')&&typeof e[k]?.onChange==='function');
+  return {ready:visible(e)&&!e.disabled&&hydrated};
+ }
+ if(op==='selectCredit'){
+  const e=document.getElementById('checkout.billing.billingoptions.credit');
+  if(!visible(e)||e.disabled)throw Error('credit_option_not_ready');
+  if(!e.checked)e.click();return {selected:e.checked};
+ }
+ const prefix='checkout.billing.billingOptions.selectedBillingOptions.creditCard.';
+ const field=s=>document.getElementById(prefix+s);
+ const set=(e,value)=>{
+  if(!visible(e)||e.disabled)throw Error('billing_field_not_ready');
+  if(e.value===value)return;
+  const proto=e.tagName==='SELECT'?HTMLSelectElement.prototype:HTMLInputElement.prototype;
+  e.focus();Object.getOwnPropertyDescriptor(proto,'value').set.call(e,value);
+  e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));e.blur();
+ };
+ const fields=[['cardInputs.cardInput-0.cardNumber',card.number],['cardInputs.cardInput-0.expiration',card.expiry],['cardInputs.cardInput-0.securityCode',card.cvv],['billingAddress.address.firstName',billing.first_name],['billingAddress.address.lastName',billing.last_name],['billingAddress.address.street',billing.street],['billingAddress.address.street2',billing.street2||''],['billingAddress.address.zipLookup.postalCode',billing.zip]];
+ const normalize=s=>(s||'').replace(/[\s/]/g,'');
+ const separate=()=>({city:[...document.querySelectorAll('input[name="city"],input[id$=".city"]')].find(visible),state:[...document.querySelectorAll('input[name="state"],select[name="state"],input[id$=".state"],select[id$=".state"]')].find(visible)});
+ const combined=()=>field('billingAddress.address.zipLookup.zipLookupCityState');
+ const matchingOption=e=>[...e.options].find(o=>!o.disabled&&norm(o.label).toLowerCase()===`${billing.city}, ${billing.state}`.toLowerCase());
+ if(op==='billingTick'){
+  const settled=guestCheckoutDOM({op:'settleCityState',billing,card});
+  const verified=guestCheckoutDOM({op:'verifyBilling',billing,card});
+  return {...verified,ready:settled.ready&&verified.ready};
+ }
+ if(op==='billingReady')return {ready:fields.every(([s])=>visible(field(s)))};
+ if(op==='fillBilling'){
+  const start=performance.now();
+  if(fields.some(([s,v])=>typeof v!=='string'||!visible(field(s))))throw Error('billing_fields_missing');
+  for(const [s,v] of fields)set(field(s),v);
+  return {filled:true,dom_ms:performance.now()-start};
+ }
+ if(op==='settleCityState'){
+  const {city,state}=separate();
+  if(city&&state){
+   set(city,billing.city);
+   if(state.tagName==='SELECT'){
+    const o=[...state.options].find(o=>!o.disabled&&(o.value===billing.state||norm(o.label)===billing.state||(billing.state==='NJ'&&norm(o.label)==='New Jersey')));
+    if(!o)return {ready:false,layout:'separate'};set(state,o.value);
+   }else set(state,billing.state);
+   return {ready:city.value===billing.city&&state.value===billing.state,layout:'separate'};
+  }
+  const combo=combined();
+  if(!visible(combo)||combo.tagName!=='SELECT')return {ready:false,layout:'loading'};
+  const option=matchingOption(combo);if(!option)return {ready:false,layout:'combined_pending'};
+  set(combo,option.value);return {ready:combo.value===option.value,layout:'combined'};
+ }
+ if(op==='verifyBilling'||op==='continueBilling'){
+  const checks=fields.map(([s,v])=>({field:s,matched:normalize(field(s)?.value)===normalize(v)}));
+  const {city,state}=separate(),combo=combined();
+  const locationReady=city&&state?city.value===billing.city&&state.value===billing.state:visible(combo)&&combo.tagName==='SELECT'&&!!matchingOption(combo)&&combo.value===matchingOption(combo).value;
+  const country=field('billingAddress.address.countryCode');
+  const countryReady=!!country&&/^(United States|US)$/.test(norm(country.value));
+  const verification={ready:checks.every(c=>c.matched)&&!!locationReady&&countryReady,checks,city_state_verified:!!locationReady,country_verified:countryReady,layout:city&&state?'separate':'combined',payment_submitted:false};
+  if(op==='verifyBilling')return verification;
+  if(!verification.ready)throw Error('billing_not_verified_before_continue');
+  const b=button('rs-checkout-continue-button-bottom','Continue');
+  if(window.__duoGuestBillingContinue)throw Error('billing_continue_already_requested');
+  window.__duoGuestBillingContinue=true;b.click();return {continue_requested:true,payment_submitted:false};
+ }
+ throw Error('unsupported_guest_operation');
+}
+export async function runGuestDOM(window,op,args={}){
+ const code='JSON.stringify(('+guestCheckoutDOM.toString()+')('+JSON.stringify({op,...args})+'))';
+ const raw=await appleScript(window.script('return do JavaScript '+JSON.stringify(code)+' in tab 1 of w'));
+ // Navigation may destroy the script reply after a successful click. Do not
+ // repeat mutations; reconcile the destination instead. Read-only polls retry.
+ if(!raw){
+  if(['bagCheckout','guestContinue','continuePayment','selectCredit','continueBilling','editSavedBilling','placeOrder'].includes(op))return {response_unknown:true};
+  const error=Error('safari_script_response_unrecognized');error.code='safari_script_response_unrecognized';throw error;
+ }
+ return JSON.parse(raw);
+}
+// Native Apple Account prompt is outside the web DOM. Only inspect sheets
+// attached to the exact isolated test profile and never send a global Escape.
+export function guestAccountPromptScript(profile,{cancel=false}={}){
+ if(!['PickupTest18Pro','Duo1024White','Duo1024Black'].includes(profile))throw Error('isolated_guest_profile_required');
+ const quoted=JSON.stringify(profile+' — ');
+ return `tell application "System Events"
+ tell process "Safari"
+  repeat with w in windows
+   if name of w starts with ${quoted} then
+    repeat with s in sheets of w
+     set isAccountPrompt to false
+     set hasDifferentAccount to false
+     set cancelControl to missing value
+     set elementsToInspect to entire contents of s
+     repeat with e in elementsToInspect
+      try
+       set elementRole to role of e as text
+       if elementRole is "AXStaticText" then
+        set v to value of e as text
+        if v contains "store.apple.com" and v contains "Account" then set isAccountPrompt to true
+       end if
+       if elementRole is "AXButton" then
+        if name of e is "Cancel" then set cancelControl to e
+        if name of e contains "different" and name of e contains "Account" then set hasDifferentAccount to true
+       end if
+      end try
+     end repeat
+     if isAccountPrompt and hasDifferentAccount and cancelControl is not missing value then
+      ${cancel?'click cancelControl\n      return "cancelled"':'return "present"'}
+     end if
+     return "unknown_sheet"
+    end repeat
+   end if
+  end repeat
+  return "absent"
+ end tell
+end tell`;
+}
+export async function cancelGuestSignIn(window,stage=()=>{},options={}){
+ const now=options.now||Date.now,pause=options.pause||(ms=>new Promise(r=>setTimeout(r,ms)));
+ const probe=options.probe||(async cancel=>{
+  // Validate the bound Safari window and route before touching native UI.
+  const state=await runGuestDOM(window,'state');
+  if(state.path!=='/shop/signIn')throw Error('native_cancel_requires_guest_signin');
+  return appleScript(guestAccountPromptScript(window.profile,{cancel}));
+ });
+ const started=now();let cancelled=false;
+ while(now()-started<6000){
+  const status=await probe(false);
+  if(status==='unknown_sheet'){
+   // A new native sheet may precede its text/buttons. Wait without clicking.
+   if(now()-started>=2000)throw Error('unknown_guest_sheet_requires_manual_review');
+   await pause(200);continue;
+  }
+  if(status==='present'){
+   if(cancelled)throw Error('guest_account_prompt_reappeared');
+   if(await probe(true)!=='cancelled')throw Error('guest_account_cancel_unconfirmed');
+   cancelled=true;stage('apple_account_cancel_clicked');
+  }else if(status==='absent'){
+   if(cancelled){stage('apple_account_prompt_closed');return {status:'cancelled_and_closed'};}
+   // Allow the optional native prompt to appear after the guest page renders.
+   if(now()-started>=2000){stage('apple_account_prompt_not_present');return {status:'not_present'};}
+  }else throw Error('guest_account_prompt_state_unknown');
+  await pause(200);
+ }
+ throw Error('guest_account_prompt_did_not_close');
+}
+export function guestAdapter(window){
+ return new Proxy(window,{get(target,key){
+  if(key==='call')return async(op,args)=>{
+   if(['checkout','add','requestApplePay'].includes(op))throw Error('guest_forbidden_action_'+op);
+   if(op==='prepareContact'){
+    // One Apple Event: wait for contact controls, fill through the shared DOM
+    // implementation, and verify Guest's own final button in the same document.
+    const code=`JSON.stringify((()=>{const guest=${guestCheckoutDOM.toString()};const shared=${safariDOM.toString()};if(!guest({op:'contactReady'}).ready)return {ready:false};const filled=shared(${JSON.stringify({op:'fillContact',args})});return {...filled,ready:filled.filled&&guest({op:'contactReady'}).ready};})())`;
+    const raw=await appleScript(target.script('return do JavaScript '+JSON.stringify(code)+' in tab 1 of w'));
+    if(!raw)return {ready:false};
+    return JSON.parse(raw);
+   }
+   return target.call(op,args);
+  };
+  if(key==='goto')return ()=>{throw Error('guest_unexpected_checkout_rebuild');};
+  const value=target[key];return typeof value==='function'?value.bind(target):value;
+ }});
+}
+export async function prepareGuest(window,url,config,stage=()=>{}){
+ const product=expectedProduct(url),start=performance.now();
+ const before=await waitFor(()=>runGuestDOM(window,'state'));
+ const alreadyBag=before.path==='/shop/bag'&&before.complete;
+ if(!alreadyBag)await window.goto('https://www.apple.com/shop/bag');
+ await waitFor(async()=>{const s=await runGuestDOM(window,'state');return s.path==='/shop/bag'&&s.complete&&(alreadyBag||s.document_time_origin!==before.document_time_origin);});
+ let stableOrigin=null,stableReads=0;
+ await waitFor(async()=>{const state=await runGuestDOM(window,'bagReady');if(!state.ready){stableReads=0;return false;}if(stableOrigin!==state.origin){stableOrigin=state.origin;stableReads=0;}return ++stableReads>=2;},20000,200);
+ const clicked=await runGuestDOM(window,'bagCheckout',{expected_product:product});stage('ordinary_checkout_clicked',clicked);
+ const next=await waitFor(async()=>{const s=await runGuestDOM(window,'state');return s.guest||s.path==='/shop/checkout'?s:null;});
+ if(next.guest){await cancelGuestSignIn(window,stage);await runGuestDOM(window,'guestContinue');stage('guest_continue_clicked');}
+ await waitFor(async()=>{const s=await runGuestDOM(window,'state');return s.path==='/shop/checkout'&&s.step==='Fulfillment-init';});
+ await waitFor(async()=>(await window.call('pickup',{product})).ready);
+ await waitFor(async()=>(await window.call('pickupReady',{product})).ready);
+ await window.call('armPickupStandby',{product,explicit_test_reset:true});
+ await prepareSafariStandby(guestAdapter(window),url,config);
+ const location=await window.call('locationState');if(location.displayed_zip!=='07094')throw Error('guest_standby_zip_not_verified');
+ stage('guest_pickup_standby_ready');return {elapsed_ms:performance.now()-start,zip:'07094',checkout:'guest'};
+}
+export async function prepareGuestStandby(window,url,config,options={}){
+ const state=await runGuestDOM(window,'state');
+ if(state.path==='/shop/checkout'&&state.step==='Fulfillment-init')return prepareSafariStandby(guestAdapter(window),url,config,options);
+ if(state.path==='/shop/checkout'&&['PickupContact-init','Billing-init','Review','Review-init'].includes(state.step))throw Error('guest_checkout_protected');
+ if(options.activeRequest||options.refresh)throw Error('guest_standby_not_ready');
+ const result=await prepareGuest(window,url,config,options.stage);
+ return {status:'standby_checkout',product:expectedProduct(url),zip:result.zip,checkout:'guest_credit'};
+}
+export async function runGuestSignal(window,url,config,billing,stage=()=>{},{mode='test',max_total_usd=0,shouldYieldToRecent,mayForeground}={}){
+ if(!['test','production'].includes(mode))throw Error('invalid_guest_payment_mode');
+ if(mode==='production'&&(/^PickupTest/.test(window.profile)||!Number.isFinite(max_total_usd)||max_total_usd<=0))throw Error('production_guest_budget_and_profile_required');
+ config={...config,pickup_details:pickupDetailsFromEnv(config.pickup_details)};
+ const start=performance.now(),card=readGuestCard();
+ const s=await waitFor(()=>runGuestDOM(window,'state'));if(s.path!=='/shop/checkout'||s.step!=='Fulfillment-init')throw Error('guest_pickup_start_required');
+ const timings={};
+ const mark=n=>{timings[n]=Math.round(performance.now()-start);stage(n);};
+ const result=await prepareSafari(guestAdapter(window),url,{...config,open_apple_pay_sheet:false},{stage:mark,shouldYieldToRecent,mayForeground});
+ if(result.status!=='awaiting_user')return {status:result.status,timings,payment_submitted:false};
+ // Re-read contact immediately before the only Continue to Payment click.
+ await window.call('fillContact',{product:expectedProduct(url),contact:config.pickup_details});
+ await runGuestDOM(window,'continuePayment');mark('continue_to_payment_clicked');
+ const destination=await waitFor(async()=>{const state=await runGuestDOM(window,'state');return state.path==='/shop/checkout'&&['Billing-init','Review','Review-init'].includes(state.step)?state:null;},config.step_timeout_ms);
+ if(['Review','Review-init'].includes(destination.step)){
+  const saved=await waitFor(async()=>{const review=await runGuestDOM(window,'reviewState');return review.ready?runGuestDOM(window,'verifySavedReview',{billing,card}):false;},config.step_timeout_ms);
+  if(saved.ready){
+   mark('saved_payment_verified');
+   const completion=await finishGuestReview(window,{mode,product:expectedProduct(url),max_total_usd});mark('review_ready');
+   return {status:completion.status,elapsed_ms:Math.round(performance.now()-start),to_review_from_refresh_ms:timings.review_ready-timings.standby_refresh_requested_at,timings,completion,verification:saved,payment_details_reused:true,fill_dom_ms:0,payment_submitted:completion.order_requested===true,order_confirmed:false};
+  }
+  // A different saved card/address must be replaced through the Billing page.
+  await runGuestDOM(window,'editSavedBilling');mark('saved_payment_mismatch_edit');
+  await waitFor(async()=>(await runGuestDOM(window,'state')).step==='Billing-init',config.step_timeout_ms);
+ }
+ mark('billing_page_ready');
+ await waitFor(async()=>(await runGuestDOM(window,'creditReady')).ready,config.step_timeout_ms);
+ await runGuestDOM(window,'selectCredit');mark('credit_selected');
+ await waitFor(async()=>(await runGuestDOM(window,'billingReady',{billing,card})).ready,config.step_timeout_ms);
+ const fill=await runGuestDOM(window,'fillBilling',{billing,card});mark('billing_fields_filled');
+ let stable=0;
+ const verification=await waitFor(async()=>{
+  const check=await runGuestDOM(window,'billingTick',{billing,card});
+  if(!check.ready){stable=0;return false;}
+  return ++stable>=2?check:false;
+ },config.step_timeout_ms,150);
+ mark('billing_verified');
+ const completion=await completeGuestPayment(window,{mode,billing,card,timeout:config.step_timeout_ms,product:expectedProduct(url),max_total_usd});
+ mark('billing_continue_finished');
+ return {status:completion.status,elapsed_ms:Math.round(performance.now()-start),from_refresh_ms:timings.billing_verified-timings.standby_refresh_requested_at,to_review_from_refresh_ms:timings.billing_continue_finished-timings.standby_refresh_requested_at,timings,completion,fill_dom_ms:fill.dom_ms,verification,payment_submitted:completion.order_requested===true,order_confirmed:false};
+}
+export async function finishGuestReview(window,{mode='test',product='',max_total_usd=0}={}){
+ if(!['test','production'].includes(mode))throw Error('invalid_guest_payment_mode');
+ if(mode==='production'&&/^PickupTest/.test(window.profile))throw Error('test_profile_cannot_place_order');
+ const review=await runGuestDOM(window,'reviewState');if(!review.ready)throw Error('order_review_not_verified');
+ if(mode==='test')return {status:'review_ready_test_stopped',payment_submitted:false};
+ const order=await runGuestDOM(window,'placeOrder',{mode,expected_product:product,max_total_usd});
+ return {status:order.response_unknown?'order_request_uncertain':'order_requested',order_confirmed:false,...order};
+}
+export async function completeGuestPayment(window,{mode='test',billing,card=readGuestCard(),timeout=20000,product='',max_total_usd=0}={}){
+ if(!['test','production'].includes(mode))throw Error('invalid_guest_payment_mode');
+ if(mode==='production'&&/^PickupTest/.test(window.profile))throw Error('test_profile_cannot_place_order');
+ await runGuestDOM(window,'continueBilling',{billing,card});
+ const outcome=await waitFor(async()=>{
+  const review=await runGuestDOM(window,'reviewState');
+  if(review.ready)return {status:'review_ready',review};
+  const billingState=await runGuestDOM(window,'billingOutcome');
+  return billingState.status==='validation_error'?{status:'billing_validation_failed',...billingState}:false;
+ },timeout);
+ if(outcome.status!=='review_ready')return {...outcome,payment_submitted:false};
+ return finishGuestReview(window,{mode,product,max_total_usd});
+}
+export async function resetGuestTestPickup(window,url,config){
+ if(window.profile!=='PickupTest18Pro')throw Error('isolated_test_profile_required');
+ const before=await runGuestDOM(window,'state');
+ if(before.path!=='/shop/checkout'||!['Review','Review-init','Billing-init','PickupContact-init','Fulfillment-init'].includes(before.step))throw Error('guest_reset_checkout_required');
+ if(before.step!=='Fulfillment-init'){
+  const current=new URL(await appleScript(window.script('return URL of tab 1 of w')));
+  current.searchParams.set('_s','Fulfillment-init');
+  await appleScript(window.script('set URL of tab 1 of w to '+JSON.stringify(current.href)));
+  await waitFor(async()=>{const s=await runGuestDOM(window,'state');return s.path==='/shop/checkout'&&s.step==='Fulfillment-init'&&s.document_time_origin!==before.document_time_origin;});
+ }
+ const product=expectedProduct(url);
+ await waitFor(async()=>(await window.call('pickup',{product})).ready);
+ await waitFor(async()=>(await window.call('pickupReady',{product})).ready);
+ await window.call('armPickupStandby',{product,explicit_test_reset:true});
+ await prepareSafariStandby(guestAdapter(window),url,config);
+}
+async function main(){
+ const args=process.argv.slice(2),arg=k=>args[args.indexOf(k)+1];
+ if(!args.includes('--config'))throw Error('usage_--config_FILE_[--billing_FILE]_[--prepare-only|--run-only]');
+ if(args.includes('--prepare-only')&&args.includes('--run-only'))throw Error('choose_one_mode');
+ const rounds=args.includes('--rounds')?Number(arg('--rounds')):1;
+ if(!Number.isInteger(rounds)||rounds<1||rounds>3)throw Error('rounds_must_be_1_to_3');
+ const profile='PickupTest18Pro',config=testConfig(JSON.parse(readFileSync(resolve(arg('--config')))),profile,testURL);
+ const billing=args.includes('--billing')?JSON.parse(readFileSync(resolve(arg('--billing')))):sampleBilling;
+ if(!['first_name','last_name','street','zip','city','state'].every(k=>typeof billing[k]==='string'&&billing[k].trim())||!/^\d{5}$/.test(billing.zip)||!/^[A-Z]{2}$/.test(billing.state))throw Error('invalid_test_billing_address');
+ const windows=(await listSafariWindows()).filter(w=>w.name.startsWith(profile+' — ')&&w.tabs>0);if(windows.length!==1||windows[0].tabs!==1)throw Error('one_isolated_test_window_required');
+ const dir=resolve('runtime/safari-regression');mkdirSync(dir,{recursive:true,mode:0o700});
+ const lock=resolve(dir,profile+'.lock'),fd=openSync(lock,'wx',0o600);closeSync(fd);
+ const window=new SafariWindow(windows[0].id,profile),report={at:new Date().toISOString(),payment_submitted:false,preparation_stages:[]};
+ const reportFile=resolve(dir,Date.now()+'-guest.json');
+ try{
+  if(!args.includes('--run-only'))report.preparation=await prepareGuest(window,testURL,config,n=>report.preparation_stages.push({name:n,at:new Date().toISOString()}));
+  if(!args.includes('--prepare-only')){
+   report.rounds=[];
+   for(let i=0;i<rounds;i++){
+    if(i>0)await resetGuestTestPickup(window,testURL,config);
+    report.signal_stages=[];
+    report.signal=await runGuestSignal(window,testURL,config,billing,n=>report.signal_stages.push({name:n,at:new Date().toISOString()}));
+    report.rounds.push(report.signal);
+    writeFileSync(reportFile,JSON.stringify(report,null,2),{mode:0o600});
+    console.log(JSON.stringify({round:i+1,status:report.signal.status,from_refresh_ms:report.signal.from_refresh_ms,to_review_from_refresh_ms:report.signal.to_review_from_refresh_ms,payment_details_reused:report.signal.payment_details_reused===true}));
+    if(!['review_ready_test_stopped','filled_not_submitted'].includes(report.signal.status))break;
+   }
+  }
+  report.status=report.signal&&!['review_ready_test_stopped','filled_not_submitted'].includes(report.signal.status)?report.signal.status:'passed';
+ }catch(e){report.status='failed';report.error=e.code||e.message;process.exitCode=1;}
+ finally{writeFileSync(reportFile,JSON.stringify(report,null,2),{mode:0o600});unlinkSync(lock);}
+ console.log(JSON.stringify({status:report.status,report:reportFile,preparation_ms:report.preparation?.elapsed_ms,signal_ms:report.signal?.elapsed_ms,error:report.error}));
+}
+if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(e=>{console.error(e.message);process.exitCode=1;});

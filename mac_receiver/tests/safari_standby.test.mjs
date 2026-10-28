@@ -291,9 +291,155 @@ test('maintenance rotates through all six slots even when earlier slots remain d
  assert.deepEqual(seen,[0,1,2,3,4,5]);
 });
 
-test('new attempt on an abandoned fulfillment page rebuilds its own document before proceeding',async t=>{
+test('new attempt reloads abandoned fulfillment in place without returning to Bag',async t=>{
  const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
  await f.page.evaluate(()=>{history.replaceState(null,'','/checkout?_s=Fulfillment-init');window.__duoPickupAttemptAbandoned=true;window.__duoPickupStoreSelected=true;});
  assert.equal((await prepareSafariStandby(f.window,url,{...cfg,recover_stalled_pickup:true})).status,'standby_checkout');
- assert.deepEqual(f.counts(),{bagLoads:2,checkoutLoads:2});assert.equal((await f.window.call('standbyState',{product})).abandoned,false);
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:2});assert.equal((await f.window.call('standbyState',{product})).abandoned,false);
+});
+
+test('stale controller recovery flag never sends an already ready pickup page to Bag',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);const stages=[];
+ assert.equal((await prepareSafariStandby(f.window,url,{...cfg,recover_stalled_pickup:true},{refresh:true,stage:s=>stages.push(s)})).status,'standby_checkout');
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:2});
+ assert.ok(stages.includes('standby_entry_ready_at'));assert.ok(!stages.includes('checkout_clicked_at'));
+});
+test('idle maintenance clears a stale pending marker after verifying the live standby page',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);let restored=0;
+ class Window{constructor(){return f.window;}}
+ const b=new SafariPickupBrowser({...cfg,safari_profile:'Test',preseeded_product_url:url,checkout_session_check_interval_seconds:30,idle_checkout_refresh_interval_seconds:1200},{Window,listWindows:async()=>[{id:1,name:'Test — Checkout',tabs:1}],standby:async()=>{restored++;throw Error('must not rebuild');}});
+ await b.start();b.lastIdleRefreshAt=0;b.stalledProfilePending=true;
+ assert.equal((await b.refreshStandby(30000)).status,'checked');assert.equal(b.stalledProfilePending,false);assert.equal(b.lastStandbyReady,true);assert.equal(restored,0);
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:1});
+});
+test('idle maintenance repairs the abandoned page before a later stock event',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','/checkout?_s=Fulfillment-init');window.__duoPickupAttemptAbandoned=true;window.__duoPickupStoreSelected=true;});
+ class Window{constructor(){return f.window;}}
+ const b=new SafariPickupBrowser({...cfg,safari_profile:'Test',preseeded_product_url:url,checkout_session_check_interval_seconds:30,idle_checkout_refresh_interval_seconds:1200},{Window,listWindows:async()=>[{id:1,name:'Test — Checkout',tabs:1}]});
+ await b.start();b.lastIdleRefreshAt=0;b.stalledProfilePending=true;
+ assert.equal((await b.refreshStandby(30000)).status,'standby_checkout');assert.equal(b.stalledProfilePending,false);assert.equal(b.lastStandbyReady,true);
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:2});assert.equal((await f.window.call('standbyState',{product})).abandoned,false);
+});
+
+test('idle seed adopts an unavailable default selection in place without navigation',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','/checkout?_s=Fulfillment-init');window.__duoStandbyPrepared=false;const e=document.querySelector('fieldset input');e.disabled=true;e.checked=true;document.body.insertAdjacentHTML('beforeend','<button>07094</button>');});
+ class Window{constructor(){return f.window;}}
+ const b=new SafariPickupBrowser({...cfg,safari_profile:'Test',preseeded_product_url:url},{Window,listWindows:async()=>[{id:1,name:'Test — Checkout',tabs:1}]});
+ await b.start();assert.equal((await b.seedIdle()).status,'standby_checkout');
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:1});assert.equal(b.lastStandbyReady,true);
+});
+test('idle reconciliation removes historical wallet markers only on unavailable Fulfillment',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','?_s=Fulfillment-init');window.__duoApplePayRequested=true;window.__duoPickupStoreSelected=true;});
+ const r=await f.window.call('reconcileReturnedPickup',{product});
+ assert.equal(r.reconciled,true);assert.equal(r.ready,true);assert.equal(r.protected,false);
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:1});
+});
+test('idle reconciliation preserves available inventory, wrong product and payment steps',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','?_s=Fulfillment-init');window.__duoApplePayRequested=true;});
+ assert.equal((await f.window.call('reconcileReturnedPickup',{product:'wrong product'})).reconciled,false);
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>e.disabled=false);
+ assert.equal((await f.window.call('reconcileReturnedPickup',{product})).reconciled,false);
+ await f.page.getByRole('radio',{name:/Apple Queens/}).evaluate(e=>e.disabled=true);
+ await f.page.evaluate(()=>history.replaceState(null,'','?_s=PickupContact-init'));
+ assert.equal((await f.window.call('reconcileReturnedPickup',{product})).reconciled,false);
+ await f.page.evaluate(()=>{history.replaceState(null,'','?_s=Fulfillment-init');document.body.insertAdjacentHTML('beforeend','<button id="co-options-applePay">Continue with Apple Pay</button>');});
+ assert.equal((await f.window.call('reconcileReturnedPickup',{product})).reconciled,false);
+ assert.equal(await f.page.evaluate(()=>window.__duoApplePayRequested),true);
+});
+test('idle seed and maintenance adopt returned unavailable Fulfillment without reload',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ const mark=()=>f.page.evaluate(()=>{history.replaceState(null,'','?_s=Fulfillment-init');window.__duoApplePayRequested=true;window.__duoPickupStoreSelected=true;});
+ await mark();class Window{constructor(){return f.window;}}
+ const b=new SafariPickupBrowser({...cfg,safari_profile:'Test',preseeded_product_url:url,checkout_session_check_interval_seconds:30,idle_checkout_refresh_interval_seconds:1200},{Window,listWindows:async()=>[{id:1,name:'Test — Checkout',tabs:1}]});
+ await b.start();assert.equal((await b.seedIdle()).status,'standby_checkout');assert.equal(b.lastStandbyReady,true);
+ await mark();b.lastStandbyCheckAt=0;b.lastIdleRefreshAt=0;
+ assert.equal((await b.refreshStandby(30000)).status,'standby_checkout');assert.equal(b.lastStandbyReady,true);
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:1});
+});
+test('urgent same-configuration retry reloads abandoned checkout once and defers East Rutherford ZIP',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','?_s=Fulfillment-init');window.__duoPickupAttemptAbandoned=true;window.__duoPickupStoreSelected=true;});
+ const calls=[],stages=[],base=f.window.call;
+ f.window.call=async(op,args)=>{
+  calls.push(op);
+  if(op==='locationState')return {displayed_zip:null,displayed_location:'Edit Zip Code or City, State, East Rutherford, NJ',editable:false};
+  return base(op,args);
+ };
+ await prepareSafariStandby(f.window,url,{...cfg,urgent_same_configuration_retry:true},{refresh:true,activeRequest:true,stage:n=>stages.push(n)});
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:2});
+ assert.ok(stages.includes('pickup_location_deferred_at'));assert.ok(!calls.includes('zip'));assert.ok(!calls.includes('openLocation'));
+});
+test('urgent retry does not accept a different city or rebuild a non-checkout page',async t=>{
+ const f=await fixture(t);
+ await assert.rejects(()=>prepareSafariStandby(f.window,url,{...cfg,urgent_same_configuration_retry:true},{refresh:true}),e=>e.code==='urgent_retry_checkout_not_ready');
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:0});
+ await prepareSafariStandby(f.window,url,cfg);const base=f.window.call;let changed=false;
+ f.window.call=async(op,args)=>{
+  if(op==='locationState')return changed?{displayed_zip:'07094',editable:true}:{displayed_zip:'10001',displayed_location:'New York, NY',editable:true};
+  if(op==='zip'){changed=true;return {applied:true};}
+  return base(op,args);
+ };
+ await prepareSafariStandby(f.window,url,{...cfg,urgent_same_configuration_retry:true});assert.equal(changed,true);
+});
+test('refresh with no rendered store list yields at the stall deadline, then successor reloads in place',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ const empty=r=>r.fulfill({contentType:'text/html',body:'<h1>Checkout</h1>'});
+ await f.page.route('**/checkout*',empty);
+ let reloads=0;const reload=f.window.reload;f.window.reload=()=>{reloads++;return reload();};
+ await f.page.evaluate(()=>history.replaceState(null,'','?_s=Fulfillment-init'));
+ // Preserve Fulfillment query through refresh; 100ms represents the configured
+ // 10-second boundary so this deterministic local test does not probe Apple.
+ await assert.rejects(()=>prepareSafari(f.window,url,{...cfg,stall_handoff_seconds:0.1},{shouldYieldToRecent:()=>true}),e=>e.code==='pickup_stalled_yield');
+ assert.equal(reloads,1);
+ assert.equal((await f.window.call('standbyState',{product})).abandoned,true);
+ await f.page.unroute('**/checkout*',empty);
+ const result=await prepareSafariStandby(f.window,url,{...cfg,urgent_same_configuration_retry:true},{refresh:true});
+ assert.equal(result.status,'standby_checkout');assert.equal(f.counts().bagLoads,1);
+ // One reload in the failed request, one resetAbandonedPickup reload in successor.
+ assert.equal(f.counts().checkoutLoads,2);assert.equal(reloads,1);
+});
+test('loading timeout retirement never abandons selected-store or payment pages',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);
+ await f.page.evaluate(()=>{history.replaceState(null,'','?_s=Fulfillment-init');window.__duoPickupStoreSelected=true;});
+ assert.equal((await f.window.call('abandonLoadingPickup',{product})).abandoned,false);
+ await f.page.evaluate(()=>{window.__duoPickupStoreSelected=false;window.__duoApplePayRequested=true;});
+ assert.equal((await f.window.call('abandonLoadingPickup',{product})).abandoned,false);
+});
+for(const activeRequest of [false,true])test(`East Rutherford is ${activeRequest?'accepted during ordinary active work':'corrected during idle preparation'}`,async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);const base=f.window.call;
+ let applied=0;const stages=[];
+ f.window.call=async(op,args)=>{
+  if(op==='locationState')return applied?{displayed_zip:'07094',editable:true}:{displayed_zip:null,displayed_location:'Edit Zip Code or City, State, East Rutherford, NJ',editable:true};
+  if(op==='zip'){applied++;return {applied:true};}
+  return base(op,args);
+ };
+ await prepareSafariStandby(f.window,url,cfg,{refresh:true,activeRequest,stage:n=>stages.push(n)});
+ assert.equal(applied,activeRequest?0:1);
+ assert.equal(stages.includes('pickup_location_deferred_at'),activeRequest);
+ assert.deepEqual(f.counts(),{bagLoads:1,checkoutLoads:2});
+});
+test('normal incoming event accepts East Rutherford without waiting for stall handoff',async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);const base=f.window.call;
+ f.window.call=async(op,args)=>{
+  if(op==='locationState')return {displayed_zip:null,displayed_location:'East Rutherford, NJ',editable:false};
+  if(['zip','openLocation'].includes(op))throw Error('active work must not edit this city');
+  return base(op,args);
+ };
+ assert.equal((await prepareSafari(f.window,url,cfg)).status,'pickup_unavailable');
+});
+for(const waiting of [false,true])test(`release preparation ${waiting?'preserves city for a waiting successor':'corrects city when genuinely idle'}`,async t=>{
+ const f=await fixture(t);await prepareSafariStandby(f.window,url,cfg);const base=f.window.call;let applied=0;
+ f.window.call=async(op,args)=>{
+  if(op==='locationState')return applied?{displayed_zip:'07094',editable:true}:{displayed_zip:null,displayed_location:'East Rutherford, NJ',editable:true};
+  if(op==='zip'){applied++;return {applied:true};}
+  return base(op,args);
+ };
+ class Window{constructor(){return f.window;}}
+ const b=new SafariPickupBrowser({...cfg,safari_profile:'Test',preseeded_product_url:url},{Window,listWindows:async()=>[{id:1,name:'Test — Checkout',tabs:1}]});
+ await b.start();b.activeTaskId='old';b.hasRecentCandidate=()=>waiting;
+ assert.equal((await b.seedIdle()).status,'standby_checkout');assert.equal(applied,waiting?0:1);
 });

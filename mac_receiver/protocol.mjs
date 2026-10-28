@@ -34,6 +34,7 @@ export function validateEvent(raw) {
       event[key] = raw[key];
     }
   }
+  if(raw.simulation_no_payment!==undefined){if(typeof raw.simulation_no_payment!=='boolean')throw new Stop('invalid_simulation_flag');event.simulation_no_payment=raw.simulation_no_payment;}
   if(raw.pickup_zip!=null){if(typeof raw.pickup_zip!=='string'||!/^[0-9]{5}$/.test(raw.pickup_zip))throw new Stop('invalid_pickup_zip');event.pickup_zip=raw.pickup_zip;}
   return event;
 }

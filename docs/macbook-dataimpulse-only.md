@@ -92,3 +92,41 @@ Agent 应回报实际 commit、凭据文件路径（不含值）、唯一运行�
 Python 主要等待 HTTPS 网络 I/O，最多四个工作线程，解析约 72 项库存；预计 CPU 负担远小于多个 Safari 页面刷新，但尚未在目标 MacBook 实测，不能保证零影响。安装好后用活动监视器观察 Python 与 Safari 的 CPU、内存和网络，分别判断。
 
 API 和浏览器共享 MacBook 网络。约 122 KB 的解码正文 × 每秒一次，约 0.98 Mbps、10.5 GB/天，仅是无停顿持续运行的正文估算；不是压缩后传输量或代理账单。手机热点需考虑套餐与代理计费。移动到同机可省 Mini→Mac 的一次传输，Apple/代理响应仍是主要等待部分；未测不能保证总流程明显加快。API 配置只影响 Python 的显式代理，不修改 Safari 的网络或系统 VPN。
+
+## 同机直连环境变量与测量（2026-10-28）
+
+`monitor.env` 可设置 `PICKUP_MAC_ENDPOINT=http://127.0.0.1:8765/prepare`。
+非空值覆盖 `PICKUP_MAC_CONFIG` 文件中的 endpoint，未设置时保留原配置，
+因此原 Mini/Tailscale 用法保持兼容。共享密钥、私网地址校验、去重、重试、
+SKU 路由和 Safari 页面的保护逻辑均保留；同机不表示绕过接收器直接点浏览器。
+
+实际路径：DataImpulse显式代理 → 本机Python查询 → 本机持久发送队列 →
+127.0.0.1 HTTP接收器 → 现有AppleScript/Safari。桥接连接使用空ProxyHandler，
+不经过Clash、系统HTTP代理或Tailscale。`bridge_client.py` 也识别该环境变量，
+显式 `--endpoint` 的优先级最高。修改环境文件后重启本机监控使其生效。
+
+发送队列新增线程唤醒事件：新通知入队即唤醒，无需等原100毫秒轮询；
+空闲时仍每100毫秒维护重试/状态检查。发送网络I/O仍在后台线程。
+`delivery.jsonl` 新增 request_ms，并保留首次刷新/选店/联系人等允许的接收时间戳，
+用于区分本机传输、队列和Apple加载，日志不记录密钥。
+
+验收：Python测试132项通过（1项跳过）。在独立随机端口的真实接收器与
+干跑Engine上，用同一Python Bridge发送10个事件，验证鉴权、序列化、
+持久队列、接收与执行状态；没有启动浏览器。生产8765另外执行10次鉴权health
+及一次空事件拒绝检查，返回400 invalid_event_id，没有插入库存事件。
+
+旧队列入队至接收中位105.75ms；立即唤醒后新建隔离outbox的10次测量：
+入队至接收中位1.30ms，范围0.84–4.88ms；至干跑执行中位2.23ms。
+生产health RTT中位1.23ms。复用旧隔离outbox的一轮中曾出现首条约981ms，
+其余约1–3ms，原始报告保留，说明这些小样本并非最坏延迟保证。
+
+生产监控已由本机LaunchAgent常驻，provider=dataimpulse，spacing=1，workers=4，
+ZIP07094、六配置。更新队列代码后重启，首16个已完成查询15成功、1网络错误；
+成功查询中位1.526秒，样本P95 2.749秒，实际发起间隔中位1.071秒。
+样本无到货通知，不能把干跑执行时间说成真实Safari开始刷新或Apple Pay就绪延迟。
+后续以真实delivery和receiver时间戳核对浏览器部分。Mini由用户安排原会话停止，
+本会话没有取得codex账号的停进程权限，也不声称已独立核验它停止。
+
+测量证据保留在未跟踪的 `runtime/local-bridge-smoke/`；生产实时状态为
+`runtime/proxy-monitor/current.json`。每秒一次是发起目标，不是每秒都能得到完整响应；
+最多四个在途、服务器明确等待、网络和通知耗时都会影响实际节奏。

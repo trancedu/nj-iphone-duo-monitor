@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 import uuid
 from monitor import load_env
-from pickup_bridge import NoRedirect, valid_product_url, private_bridge_ipv4
+from pickup_bridge import NoRedirect, valid_product_url, private_bridge_ipv4, endpoint_config
 
 
 def main():
@@ -32,7 +32,7 @@ def main():
         a.event.chmod(0o600)
         print(json.dumps({'event_id': value['event_id'], 'status': 'event_created'}));return
     if a.env_file: load_env(a.env_file)
-    cfg = json.loads(a.config.read_text()) if a.config.exists() else {}
+    cfg = endpoint_config(json.loads(a.config.read_text()) if a.config.exists() else {})
     base = (a.endpoint or cfg.get('endpoint', '')).removesuffix('/prepare').rstrip('/')
     # Reuse sender endpoint validation without creating an outbox or starting a thread.
     import ipaddress

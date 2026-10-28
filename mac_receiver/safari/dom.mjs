@@ -44,13 +44,33 @@ export function safariDOM({op,args={}}) {
     click(candidates[0]);return {clicked:true};
   }
   const canAbandonPickup=()=>u.searchParams.get('_s')==='Fulfillment-init'&&norm(document.body?.textContent).includes(args.product)&&!window.__duoApplePayRequested&&!document.getElementById('co-options-applePay')&&!all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent)));
+  const canRetireLoading=()=>u.searchParams.get('_s')==='Fulfillment-init'&&!window.__duoApplePayRequested&&!window.__duoPickupStoreSelected&&!document.getElementById('co-options-applePay')&&!all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent)));
+  if(op==='abandonLoadingPickup'){
+    // Called only by the bound profile's pre-store workflow, after its refresh.
+    if(!canRetireLoading())return {abandoned:false};
+    window.__duoPickupLoadingAbandoned=args.product;
+    window.__duoPickupAttemptAbandoned=true;return {abandoned:true};
+  }
   if(op==='abandonStalledPickup'){
     if(!canAbandonPickup())return {abandoned:false};
     window.__duoPickupAttemptAbandoned=true;return {abandoned:true};
   }
   if(op==='resetAbandonedPickup'){
-    if(!canAbandonPickup())return {reset:false};
-    location.href='https://www.apple.com/shop/bag';return {reset:true};
+    if(!canAbandonPickup()&&!(window.__duoPickupLoadingAbandoned===args.product&&canRetireLoading()))return {reset:false};
+    location.reload();return {reset:true};
+  }
+  if(op==='reconcileReturnedPickup'){
+    // Idle-only caller: an old wallet marker can survive SPA back navigation.
+    // Never reset a live store/time selection or any contact/payment page.
+    const state=safariDOM({op:'standbyState',args});
+    const unavailable=stores().length>0&&stores().every(e=>!enabled(e)&&/Currently unavailable|Unavailable for pickup|Not available/i.test(name(e)));
+    const heading=all('h1,h2').some(e=>visible(e)&&/How would you like to get your order\?/i.test(norm(e.textContent)));
+    if(!window.__duoApplePayRequested||u.searchParams.get('_s')!=='Fulfillment-init'||!state.matching_product||!state.pickup_ready||!state.pickup_selected||!heading||!unavailable||state.expired||state.session_warning||state.protection.final_button_present||state.protection.contact_heading)return {reconciled:false};
+    window.__duoApplePayRequested=false;
+    window.__duoPickupStoreSelected=false;
+    window.__duoPickupContinueRequested=false;
+    window.__duoPickupAttemptAbandoned=false;
+    return {reconciled:true,...safariDOM({op:'armPickupStandby',args})};
   }
   if(op==='rearmExpiredPickupStandby'){
     // Called only after a stopped/finished request; validate live inventory atomically.
@@ -81,7 +101,7 @@ export function safariDOM({op,args={}}) {
     const matching=typeof args.product==='string'&&norm(document.body?.textContent).includes(args.product);
     const processing=all('img,[aria-busy="true"],[role="progressbar"]').some(e=>visible(e)&&(e.tagName!=='IMG'||name(e)==='Processing'));
     const zipInput=all('input[role="combobox"]').some(e=>visible(e)&&name(e)==='Zip Code or City, State');
-    return {abandoned:!!window.__duoPickupAttemptAbandoned,ready:checkout&&matching&&!!storeList()&&!protectedPage&&!expired,expired,session_warning:continueSessionButtons().length===1,protected:protectedPage,matching_product:matching,checkout,document_time_origin:performance.timeOrigin,pickup_ready:!processing&&!!storeList()&&visible(storeList())&&stores().length>0,zip_needed:zipInput,pickup_selected:radio(/^I[’']ll pick it up/i).some(checked)};
+    return {protection:{payment_requested:!!window.__duoApplePayRequested,script_store_selected:!!window.__duoPickupStoreSelected,final_button_present:!!document.getElementById('co-options-applePay'),final_button_visible:visible(document.getElementById('co-options-applePay')),contact_heading:all('h1,h2').some(e=>/pickup information|order confirmation|thank you for your order/i.test(norm(e.textContent))),default_selection:!window.__duoStandbyPrepared&&(stores().some(checked)||!!slot()?.value)},abandoned:!!window.__duoPickupAttemptAbandoned,ready:checkout&&matching&&!!storeList()&&!protectedPage&&!expired,expired,session_warning:continueSessionButtons().length===1,protected:protectedPage,matching_product:matching,checkout,document_time_origin:performance.timeOrigin,pickup_ready:!processing&&!!storeList()&&visible(storeList())&&stores().length>0,zip_needed:zipInput,pickup_selected:radio(/^I[’']ll pick it up/i).some(checked)};
   }
   if(op==='performanceState'){
     const n=performance.getEntriesByType('navigation')[0];

@@ -78,3 +78,14 @@ test('visible fallback configured store needs no expansion; missing store never 
   await assert.rejects(()=>ensureRequestedStoreVisible(browser),e=>e.code==='target_store_not_listed');
   assert.equal(await page.locator('input:checked').count(),0);
 });
+
+test('pickup contact environment overrides individual fields and preserves configuration',async()=>{
+ const {pickupDetailsFromEnv}=await import('../pickup_details.mjs');
+ const config={first_name:'Old',last_name:'Person',email:'old@example.com',phone:'2015550123',store_name:'Apple Test',preferred_slot:2};
+ const result=pickupDetailsFromEnv(config,{APPLE_PICKUP_FIRST_NAME:' New ',APPLE_PICKUP_EMAIL:'new@example.com',APPLE_PICKUP_PHONE:'+1 (929) 555-0123'});
+ assert.equal(result.first_name,'New');assert.equal(result.last_name,'Person');assert.equal(result.email,'new@example.com');assert.equal(result.phone,'9295550123');assert.equal(result.preferred_slot,2);assert.equal(config.first_name,'Old');assert.deepEqual(pickupDetailsFromEnv(config,{}),config);
+});
+test('invalid contact environment never falls back silently or exposes its value',async()=>{
+ const {pickupDetailsFromEnv}=await import('../pickup_details.mjs');
+ for(const env of [{APPLE_PICKUP_FIRST_NAME:''},{APPLE_PICKUP_EMAIL:'invalid-private-value'},{APPLE_PICKUP_PHONE:'123'}])assert.throws(()=>pickupDetailsFromEnv({},env),e=>e.code==='pickup_contact_environment_invalid'&&!e.message.includes('invalid-private-value'));
+});

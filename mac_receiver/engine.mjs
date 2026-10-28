@@ -27,7 +27,7 @@ export class Engine {
   }
   log(item,stage) {
     appendFileSync(join(this.config.state_dir,'events.jsonl'),JSON.stringify({at:now(),event_id:item.event_id,
-      status:item.status,reason:item.reason,idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at,release_reason:item.release_reason,product_url:item.product_url,store_id:item.store_id,store_name:item.store_name,profile_label:this.config.profile_label,browser_backend:this.config.browser_backend||'chrome',stage,timestamps:item.timestamps})+'\n',{mode:0o600});
+      status:item.status,reason:item.reason,idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at,release_reason:item.release_reason,payment_watch:item.payment_watch,payment_failure_retry_of:item.payment_failure_retry_of,product_url:item.product_url,store_id:item.store_id,store_name:item.store_name,profile_label:this.config.profile_label,browser_backend:this.config.browser_backend||'chrome',stage,timestamps:item.timestamps})+'\n',{mode:0o600});
   }
   health() {
     this.expireHeld();
@@ -36,7 +36,7 @@ export class Engine {
       ...(this.config.idle_bag_refresh_interval_seconds?{idle_bag_refresh_interval_seconds:this.config.idle_bag_refresh_interval_seconds}:{}),
       ...(this.config.standby_page?{standby_page:this.config.standby_page,idle_checkout_refresh_interval_seconds:this.config.idle_checkout_refresh_interval_seconds,checkout_session_check_interval_seconds:this.config.checkout_session_check_interval_seconds||60,pickup_zip:this.config.pickup_zip}:{}),
       ...(this.browser.lastSessionCheck?{checkout_session_watch:this.browser.lastSessionCheck}:{}),
-      ready:this.config.dry_run||this.browser.ready(),pending_events:Object.values(this.state.events).filter(x=>x.status==='held').length,apple_pay_verified:'manual_verification_required'};
+      ready:this.config.dry_run||this.browser.ready(),...(this.config.standby_page?{standby_page_verified:!this.state.active&&this.browser.lastStandbyReady===true}:{}),pending_events:Object.values(this.state.events).filter(x=>x.status==='held').length,apple_pay_verified:'manual_verification_required'};
   }
   accept(event) {
     this.expireHeld();
@@ -57,12 +57,13 @@ export class Engine {
     return {code:status==='busy'?409:status==='queue_full'?429:status==='browser_not_ready'?503:202,body:this.public(item)};
   }
   public(item) {
-    return {event_id:item.event_id,status:item.status,reason:item.reason,timestamps:item.timestamps,...(item.feedback?{feedback:item.feedback}:{}),...(item.signal_feedback?{signal_feedback:item.signal_feedback}:{}),...(item.last_observation?{last_observation:item.last_observation,diagnostic_count:item.diagnostic_count}:{}),...(item.idle_watch_state?{idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at}:{}),...(item.release_reason?{release_reason:item.release_reason,reset_at:item.reset_at}:{})};
+    return {event_id:item.event_id,status:item.status,reason:item.reason,timestamps:item.timestamps,...(item.feedback?{feedback:item.feedback}:{}),...(item.signal_feedback?{signal_feedback:item.signal_feedback}:{}),...(item.last_observation?{last_observation:item.last_observation,diagnostic_count:item.diagnostic_count}:{}),...(item.payment_watch?{payment_watch:item.payment_watch}:{}),...(item.idle_watch_state?{idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at}:{}),...(item.release_reason?{release_reason:item.release_reason,reset_at:item.reset_at}:{})};
   }
   stage(item,name,detail) {
     item.timestamps[name]=now();
     if(detail){const observation=sanitizeObservation(detail);appendDiagnostic(join(this.config.state_dir,'diagnostics.jsonl'),{at:item.timestamps[name],event_id:item.event_id,stage:name,...observation});item.last_observation=observation;item.diagnostic_count=(item.diagnostic_count||0)+1;}
     this.save(); this.log(item,name);
+    if(name==='apple_pay_sheet_requested_at')this.armPaymentDeadline(item);
   }
   async execute(item) {
     this.browser.activeTaskId=item.event_id;
@@ -89,6 +90,10 @@ export class Engine {
     const progressed=['pickup_stock_found_at','store_selected_at','time_selected_at','pickup_time_at','details_navigation_at','details_page_ready_at','contact_verified_at','pickup_details_at','handoff_at'].some(key=>Object.hasOwn(item.timestamps,key));
     if(item.status==='pickup_unavailable'&&progressed){item.status='manual_review';item.reason='pickup_unavailable_after_selection_preserved';}
     this.stage(item,'finished_at');
+    if(item.timestamps.apple_pay_sheet_requested_at&&Date.now()-Date.parse(item.timestamps.apple_pay_sheet_requested_at)>=10000&&this.browser.expirePaymentWindow){
+      await this.watchPaymentDeadline();
+      if(this.state.active!==item.event_id)return;
+    }
     if(item.status==='superseded'||item.status==='lock_timeout'){
       item.release_reason=item.status==='superseded'?'stalled_pickup_handoff':'profile_deadline';this.stage(item,'stalled_released_at');
       this.reset(item.event_id,true);
@@ -113,6 +118,56 @@ export class Engine {
         this.onUnavailableReleased?.(item.event_id);
       }
     }
+  }
+  armPaymentDeadline(item){
+    if(!this.browser.expirePaymentWindow)return;
+    clearTimeout(this.paymentDeadlineTimer);
+    const remaining=Date.parse(item.timestamps.apple_pay_sheet_requested_at)+10000-Date.now();
+    this.paymentDeadlineTimer=setTimeout(()=>{this.watchPaymentDeadline().catch(()=>{});},Math.max(0,remaining));
+    this.paymentDeadlineTimer.unref();
+  }
+  async watchPaymentDeadline(nowMs=Date.now()){
+    const item=this.state.events[this.state.active],requested=item?.timestamps.apple_pay_sheet_requested_at;
+    if(!requested||!this.browser.expirePaymentWindow||nowMs-Date.parse(requested)<10000||this.releasing||this.signaling)return false;
+    if(['queued','running'].includes(item.status)){this.browser.abortEventId=item.event_id;return false;}
+    this.releasing=true;
+    try{
+      item.status='payment_window_expired';item.release_reason='payment_window_10_seconds';
+      this.stage(item,'payment_window_released_at');
+      this.reset(item.event_id,true); // The ordinary SKU lock ends at the deadline.
+      await this.browser.expirePaymentWindow(item);
+      this.stage(item,'payment_window_pickup_restored_at');return true;
+    }catch{
+      item.reason='payment_window_restore_failed';this.save();this.log(item,'payment_window_restore_failed');return false;
+    }finally{
+      this.releasing=false;this.onProfileReleased?.(item.event_id);
+    }
+  }
+  async watchPaymentFailure(nowMs=Date.now()){
+    const item=this.state.events[this.state.active];
+    if(!item||!['awaiting_user','manual_review'].includes(item.status)||(!item.timestamps.apple_pay_sheet_requested_at&&!item.timestamps.payment_observer_armed_at)||this.releasing||this.signaling||!this.browser.inspectPaymentFailure)return false;
+    if(nowMs<(this.nextPaymentPoll||0))return false;
+    this.nextPaymentPoll=nowMs+1000;
+    let state;try{state=await this.browser.inspectPaymentFailure(item);}catch{return false;}
+    if(this.state.active!==item.event_id)return false;
+    if(!item.timestamps.apple_pay_sheet_requested_at&&state.observed===true&&Number.isFinite(Date.parse(state.requested_at))){
+      item.timestamps.apple_pay_sheet_requested_at=state.requested_at;
+      this.save();this.log(item,'manual_apple_pay_open_observed');this.armPaymentDeadline(item);
+      this.onPaymentWindowObserved?.(item.event_id,state.requested_at);
+    }
+    const observation={phase:state.phase||'unknown',outcome:state.outcome||'unknown',closed:state.closed===true,observed:state.observed===true};
+    if(JSON.stringify(item.payment_watch)!==JSON.stringify(observation)){item.payment_watch=observation;this.save();this.log(item,'payment_result_observed');}
+    if(!state.recoverable||state.outcome!=='failed'||this.state.active!==item.event_id||this.releasing||this.signaling)return false;
+    this.releasing=true;let released=false;
+    try{
+      this.stage(item,'payment_failure_detected_at');
+      item.status='payment_failed_recovering';item.release_reason='confirmed_payment_failure';
+      this.stage(item,'payment_failure_released_at');this.reset(item.event_id,true);
+      await this.browser.recoverPaymentFailure(item);
+      item.status='payment_failed_returned';this.stage(item,'payment_failure_pickup_restored_at');released=true;return true;
+    }catch{
+      item.status='manual_review';item.reason='payment_failure_restore_failed';this.save();this.log(item,'payment_failure_restore_failed');return false;
+    }finally{this.releasing=false;if(released)(this.onPaymentFailureReleased||this.onProfileReleased)?.(item.event_id);else if(this.state.active!==item.event_id)this.onProfileReleased?.(item.event_id);}
   }
   async watchIdle(nowMs=Date.now()) {
     const seconds=this.config.handoff_idle_timeout_seconds||0,item=this.state.events[this.state.active];

@@ -68,6 +68,10 @@ An independent experimental rotating-proxy runner is available for the local
 07094 test. It uses persistent per-exit cooldowns and does not change the standard
 monitor below. See [deployment instructions](docs/proxy-monitor-deployment.md).
 
+For the separate, manual-payment browser rehearsal, see
+[the observed checkout flow and optional Playwright recording script](docs/checkout-rehearsal.md).
+It is not connected to inventory alerts and does not place orders.
+
 ```sh
 python3 -m unittest discover -s tests -v
 python3 monitor.py --smoke-test

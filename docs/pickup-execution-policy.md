@@ -259,3 +259,59 @@ Apple Pay 只允许一个自动流程持有面板；其他配置可并行完成�
 ```
 
 `global_lock_timeout_seconds` 沿用旧字段名，在此模式中解释为每配置超时。health 返回 execution_policy=per_configuration、profile_lock_timeout_seconds=60 和各配置 active_event_id。
+
+### 修正：实时待机页优先于历史恢复标记
+
+旧实现把控制器的 stalledProfilePending 视为无条件回购物车的指令，即使页面已处于正确自提页，也会在新信号到达后重建。这会浪费库存窗口。现以实时 DOM 为准：健康的 Checkout / I’ll pick it up / 07094 只做事件正常的一次刷新，不因旧控制器标记退回购物车。真正带 abandoned 标记的 Fulfillment 文档最多原地重载一次，撤销旧异步页面状态；不会重复刷新，也不经过购物车。只有会话已过期、跳到 Bag/错误页等确实未就绪时才走购物车重建。
+
+旧任务退出后将对应窗口的会话检查设为立即到期，空闲维护会提前修复该窗口，成功后清除历史恢复标记；正常待机核验也能清掉陈旧控制器标记。health 增加 standby_page_verified，区分“浏览器能通信”和“最近已核验自提待机”。入口日志记录 ready/abandoned/expired/unprepared，内层购物车 seed 不再覆盖整个事件 started_at。
+
+Idle Safari reconciliation also handles a historical Apple Pay request marker surviving
+SPA navigation back to Fulfillment. Only an idle window showing the matching product,
+selected pickup mode, a ready store list with every store disabled/unavailable, and
+Fulfillment-init may discard that historical marker and re-arm in place. Contact,
+final Apple Pay button, session warning, loading, available inventory and unknown
+states remain protected. The shared standby workflow then verifies/corrects 07094
+without returning an already valid Fulfillment page to Bag.
+
+## 同配置十秒卡顿后的紧急重试
+
+同一 SKU（容量和颜色一致，不要求同门店）已有新库存候选时，旧尝试在门店/时间/下一步阶段卡满十秒后结束。仅使用十秒有效期内最新候选，不恢复过期通知；旧协程已退出才启动下一次。候选优先于后台待机修复。
+
+后继请求标记 `same_configuration_stall_retry`，复用当前 Fulfillment Checkout，原页刷新一次后选首个可用门店。原页确实已被标记 abandoned 时，该次清理刷新就是新事件的初始刷新，不能再刷新第二次；不得通过 Bag 重建。当前不是可恢复的 Checkout、会话已过期或有续期弹窗则停止紧急分支，留给普通恢复处理。联系人/付款状态不按这个规则回退。
+
+仅此紧急分支中，配置目标为 07094、位置明确显示 East Rutherford, NJ 时暂缓修改邮编，记录 pickup_location_deferred_at；数字 07094 同样直接继续。其他位置仍校验/纠正，不把未知城市当成合适位置。普通请求和空闲恢复继续严格校验07094。无货的既有有界重试上限不变；这不承诺一定获得日期/时间或订单。
+
+## 2026-10-28 更新：所有活动库存请求均接受 East Rutherford
+
+此规则替代上文“仅紧急同配置重试”的邮编例外。空闲待机准备、启动恢复和空闲维护仍严格确认07094；从库存通知开始的执行阶段，无论首次事件、正常排队后接手还是十秒超时后紧急接手，只要显示07094或East Rutherford（可带NJ），就直接继续，不打开位置编辑器、不重新Apply。该例外覆盖初始暖Checkout刷新、无货重试及指定店缺失时的位置回退校验。其他城市、未知位置或明确不同的数字邮编仍按配置纠正，不能把任意位置当作07094。
+
+活动阶段通过prepareSafariStandby的activeRequest选项显式传入；空闲调用默认false，不依赖请求是否urgent。时间、联系人和付款保护逻辑不变。独立测试准备仍严格核对07094，正式计时阶段采用同一活动策略。
+
+释放上一条时如存在仍有效的同SKU候选，seedIdle传入activeRequest=true；这段交接不算真正空闲，显示East Rutherford时不重设邮编。无候选时默认严格设置07094。排队过期、已选店、联系人、付款等边界继续沿用原规则，不因放宽位置文字识别而解除页面保护。
+
+## Apple Pay 自动弹窗间隔（2026-10-28 更新）
+
+所有配置共用 15 秒付款弹窗冷却期，从自动请求打开 Apple Pay 前抢占锁的时刻开始计时，不等待生物认证或付款结果。期间其他配置可以继续准备，但最后按钮交给用户手动点击；被挡住的付款动作不排队、不在冷却结束后补弹。15 秒后只有后续到达最后一步的新请求可以再次自动弹窗。
+
+锁及起始时间持久化，服务重启不能缩短间隔；清理普通任务锁也不能提前解除这个冷却期。此规则不判断支付成功、失败或取消，也不保证旧面板超过 15 秒仍打开时没有重叠；这是用户选择的时间规则。当前测试页的关闭事件探针尚未接入正式放行逻辑。
+
+## Apple Pay 十秒硬期限（2026-10-28，取代上述十五秒策略）
+
+从发起 Apple Pay 请求的时间开始计时，付款弹窗冷却与同款任务期限统一为 10 秒。明确观察到付款失败时可提前恢复；否则无论成功、取消、失败或结果未知，十秒到期后结束该同款任务，并立即发起回到原 Apple Pay Checkout 的 Fulfillment / I’ll pick it up 页面。此为用户明确选择的硬期限，可能中断仍在进行的付款；超时本身不表示付款成功或失败。
+
+定时器负责正常到期，服务的每秒期限检查负责补偿及重启恢复。若原浏览器调用仍在运行，先中止其后续操作，待调用返回后恢复；无法强行使阻塞的系统调用或网络页面在十秒内完成加载。页面恢复前同款新请求暂存，恢复后只执行最新且仍在原十秒有效期内的候选；不延长旧事件库存有效期，不自动重放旧付款动作。不同配置仍独立准备。
+
+回自提直接使用当前 secure checkout 的 Fulfillment URL；不经过购物袋、不为紧急重试改邮编。若恢复失败，记录 `payment_window_restore_failed`，不会把它记成恢复成功。真实支付结果与任务超时状态分开：`payment_window_expired` 不能解读为未购买。
+
+Apple Pay 观测只保存事件 ID、时间、是否收到授权事件及完成状态；不读取或保存卡号、支付 token、账单地址。观察器原样传递 ApplePaySession 的调用及返回值，不代替授权或修改付款结果。取消事件本身不等于支付失败；明确失败或到达硬期限才触发对应恢复路径。
+
+### 明确失败后的主动重查与手动付款覆盖
+
+失败检查每秒进行，独立于可能耗时的页面保活和 session 恢复；没有活动付款任务时不读取付款页面。所有正式联系人待付款页提前安装观察器，包含因其他面板占用而交给用户手动点 Apple Pay 的页面。实际开始时间被观测后立即补上相同的十秒期限；原生 API 无法挂接时，真实的手动按钮点击仍提供超时计时起点。
+
+明确失败且面板已关闭后恢复自提，释放本任务拥有的付款门禁，不解除其他配置后续取得的门禁。若有最新有效的同款库存事件，优先交给它；若没有，创建一次标记为 `payment_failure_retry_of` 的本机重查，刷新后重新读取实际库存，而非宣称监控发现了新货。无货退出；这次本机重查再次失败后不会自循环。重查尚未执行时收到新库存事件，旧重查直接作废。
+
+付款尝试绑定已验证的事件和商品配置，不要求联系人页面重新展示商品名，避免订单摘要未渲染时漏判。检测状态以 `payment_watch` 记录 phase、outcome、closed 和 observed；日志包含观察器安装、付款状态变化、失败恢复、十秒释放以及后继执行时间。未知结果、单纯取消不能当成已知付款失败；十秒到期仍执行用户指定的无条件返回，但不会因未知结果主动重复付款。
+
+以上为模拟失败回归验证。不能保证识别只显示在原生系统面板、且未通过网页 API 或页面错误传回的所有银行或系统错误；真实交易失败仍需用上述日志验证，不能用单元测试冒充现场验证。

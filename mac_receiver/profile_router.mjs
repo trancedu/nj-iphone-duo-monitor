@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {randomUUID} from 'node:crypto';
 import {openReceiverListeners} from './listeners.mjs';
 import {readFileSync,mkdirSync,openSync,closeSync,writeFileSync,existsSync,unlinkSync,renameSync} from 'node:fs';
 import {resolve,dirname,join} from 'node:path';
@@ -6,7 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {createReceiver} from './server.mjs';
 import {PickupBrowser} from './browser.mjs';
 import {SafariPickupBrowser,pollSafariSlots} from './safari/browser.mjs';
-import {listSafariWindows} from './safari/shopping.mjs';
+import {listSafariWindows,waitFor} from './safari/shopping.mjs';
 import {audioQueueState} from './safari/feedback.mjs';
 import {Engine} from './engine.mjs';
 import {Stop,productURL,expectedProduct,privateIPv4,fingerprint} from './protocol.mjs';
@@ -16,21 +17,47 @@ export class ProfileRouter {
     this.config=config;this.slots=slots;
     this.onGlobalTimeout=onGlobalTimeout;
     if(config.per_profile_requests){
-      const paying=slots.find(s=>s.engine.state.events[s.engine.state.active]?.timestamps?.apple_pay_sheet_requested_at);
-      this.paymentOwner=paying?.engine.state.active||null;
+      mkdirSync(config.state_dir,{recursive:true,mode:0o700});
+      this.paymentLeaseFile=join(config.state_dir,'payment-panel-lease.json');
+      const saved=existsSync(this.paymentLeaseFile)?JSON.parse(readFileSync(this.paymentLeaseFile,'utf8')):null;
+      const latest=slots.flatMap(s=>Object.values(s.engine.state.events)).filter(e=>e.timestamps?.apple_pay_sheet_requested_at).sort((a,b)=>b.timestamps.apple_pay_sheet_requested_at.localeCompare(a.timestamps.apple_pay_sheet_requested_at))[0];
+      this.paymentOwner=saved?saved.event_id:(latest?.event_id||null);
+      this.paymentClaimedAt=saved?saved.claimed_at:(latest?.timestamps.apple_pay_sheet_requested_at||null);
+      this.expirePaymentLease();
       for(const slot of slots){
         slot.browser.hasRecentCandidate=id=>slot.engine.state.active===id&&!!this.latestRecentCandidate(id,Date.now(),slot);
         slot.browser.shouldAbandonStall=id=>slot.engine.state.active===id;
         const dispatch=id=>{
-          if(this.paymentOwner===id&&!slot.engine.state.events[id]?.timestamps?.apple_pay_sheet_requested_at)this.paymentOwner=null;
+          this.scheduleProfile(slot);
+        };
+        slot.engine.onPaymentWindowObserved=(id,at)=>{
+          this.expirePaymentLease();
+          if(!this.paymentOwner){this.paymentOwner=id;this.paymentClaimedAt=at;writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:id,claimed_at:at}),{mode:0o600});}
+        };
+        slot.engine.onPaymentFailureReleased=id=>{
+          // A confirmed failed/closed sheet no longer owns the payment gate.
+          // Do not clear a different product's newer lease.
+          if(this.paymentOwner===id){
+            this.paymentOwner=null;this.paymentClaimedAt=null;
+            writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:null,claimed_at:null}),{mode:0o600});
+          }
+          const failed=slot.engine.state.events[id];
+          if(!this.latestRecentCandidate(null,Date.now(),slot)&&failed&&(failed.payment_failure_retry_count||0)<1){
+            // This is a local recheck, not a new claim of API-observed stock.
+            // prepareSafari must refresh and observe live availability again.
+            this.holdRecent(slot,{event_id:'payment-recheck-'+randomUUID(),product_url:failed.product_url,detected_at:new Date().toISOString(),pickup_zip:failed.pickup_zip||this.config.pickup_zip,store_name:failed.store_name,store_id:failed.store_id,payment_failure_retry_count:(failed.payment_failure_retry_count||0)+1,payment_failure_retry_of:failed.payment_failure_retry_of||id,...(failed.simulation_no_payment===true?{simulation_no_payment:true}:{})});
+          }
           this.scheduleProfile(slot);
         };
         slot.engine.onStalledReleased=dispatch;slot.engine.onProfileReleased=dispatch;slot.engine.onUnavailableReleased=dispatch;
         slot.browser.tryClaimApplePay=id=>{
-          if(this.paymentOwner&&this.paymentOwner!==id)return false;
-          this.paymentOwner=id;return true;
+          this.expirePaymentLease();
+          if(this.paymentOwner)return false;
+          this.paymentOwner=id;this.paymentClaimedAt=new Date().toISOString();
+          writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:id,claimed_at:this.paymentClaimedAt}),{mode:0o600});
+          return true;
         };
-        slot.browser.mayForeground=id=>!this.paymentOwner||this.paymentOwner===id;
+        slot.browser.mayForeground=id=>{this.expirePaymentLease();return !this.paymentOwner||this.paymentOwner===id;};
       }
     }
 
@@ -60,6 +87,12 @@ export class ProfileRouter {
       };
     }
   }
+  expirePaymentLease(nowMs=Date.now()){
+    if(this.paymentOwner&&nowMs-Date.parse(this.paymentClaimedAt)>=10000){
+      this.paymentOwner=null;this.paymentClaimedAt=null;
+      writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:null,claimed_at:null}),{mode:0o600});
+    }
+  }
   latestRecentCandidate(owner,nowMs=Date.now(),onlySlot=null){
     this.expireWaiting(nowMs);
     return this.waiting().filter(x=>x.item.event_id!==owner&&(!onlySlot||x.slot===onlySlot)&&x.slot.browser.ready()).sort((a,b)=>b.item.timestamps.received_at.localeCompare(a.item.timestamps.received_at))[0]||null;
@@ -71,18 +104,20 @@ export class ProfileRouter {
     if(slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent||slot.browser.idleRefreshPromise)return false;
     const next=this.latestRecentCandidate(null,nowMs,slot);if(!next)return false;
     const item=next.item;item.status='queued';delete item.reason;
+    item.same_configuration_stall_retry=slot.browser.stalledProfilePending===true;
     slot.engine.state.active=item.event_id;slot.engine.save();slot.engine.log(item,'latest_profile_candidate_dispatched');
     setImmediate(()=>slot.engine.execute(item));return true;
   }
   watchProfileTimeouts(nowMs=Date.now()){
     for(const slot of this.slots){
-      const e=slot.engine,id=e.state.active,item=e.state.events[id];if(!item)continue;
+      const e=slot.engine;void e.watchPaymentDeadline(nowMs).catch(()=>{});
+      const id=e.state.active,item=e.state.events[id];if(!item)continue;
       const seconds=this.config.global_lock_timeout_seconds||60;
       if(nowMs-Date.parse(item.timestamps.received_at)<seconds*1000)continue;
       slot.browser.abortEventId=id;
       if(['queued','running'].includes(item.status))continue; // Wait for its guarded workflow to unwind.
       if(e.releasing||e.signaling)continue;
-      slot.browser.stalledProfilePending=true;item.status='lock_timeout';item.release_reason='profile_deadline';e.stage(item,'timeout_released_at');
+      slot.browser.stalledProfilePending=true;slot.browser.lastStandbyCheckAt=0;item.status='lock_timeout';item.release_reason='profile_deadline';e.stage(item,'timeout_released_at');
       e.reset(id,true);this.scheduleProfile(slot);
     }
     this.dispatchWaiting(nowMs);return true;
@@ -182,6 +217,11 @@ export class ProfileRouter {
     const slot=this.slotForEvent(event.event_id)||this.slotForURL(event.product_url);
     if(!slot)throw new Stop('unsupported_product_url');
     const existing=slot.engine.state.events[event.event_id];
+    if(this.config.per_profile_requests&&!existing&&!event.payment_failure_retry_of){
+      for(const old of Object.values(slot.engine.state.events))if(old.status==='global_waiting'&&old.payment_failure_retry_of){
+        old.status='expired';old.reason='payment_recheck_superseded_by_new_signal';old.timestamps.finished_at=new Date().toISOString();slot.engine.save();slot.engine.log(old,'payment_recheck_superseded');
+      }
+    }
     if(existing?.status==='global_waiting'){
       if(existing.fingerprint!==fingerprint(event))return {code:409,body:{event_id:event.event_id,status:'event_id_conflict'}};
       this.expireWaiting();return {code:200,body:this.public(existing)};
@@ -206,10 +246,52 @@ export class ProfileRouter {
     }
   }
   public(item){const slot=this.slotForEvent(item.event_id);return {...slot.engine.public(item),...(item.status==='global_waiting'?{status:'held'}:{}),profile_label:slot.label,product:expectedProduct(item.product_url)};}
+  manualRetry({profile_label,expected_event_id,restore_only}){
+    if(!this.config.per_profile_requests||this.config.browser_backend!=='safari')throw new Stop('manual_retry_unsupported');
+    const slot=this.slots.find(s=>s.label===profile_label);if(!slot)throw new Stop('unsupported_profile');
+    const e=slot.engine;
+    if(slot.manualRetryEvent)return {status:'manual_retry_preparing',event_id:slot.manualRetryEvent,profile_label,already_running:true,restore_only:e.state.events[slot.manualRetryEvent]?.restore_only};
+    if((e.state.active||null)!==expected_event_id)throw new Stop('retry_owner_changed');
+    const oldId=e.state.active,id='manual-retry-'+randomUUID(),at=new Date().toISOString();
+    const item={event_id:id,product_url:slot.product_url,detected_at:at,manual_retry:true,restore_only,status:'manual_retry_preparing',timestamps:{detected_at:at,received_at:at}};
+    item.fingerprint=fingerprint(item);e.state.events[id]=item;e.save();e.log(item,'manual_retry_requested');
+    slot.manualRetryEvent=id;slot.reservedEvent=id;
+    if(oldId)slot.browser.abortEventId=oldId;
+    setImmediate(async()=>{
+      let claimed=false;
+      try{
+        // Wait for the old runner/recovery to unwind; never run two scripts on
+        // one profile or terminate a different configuration's browser work.
+        await waitFor(()=>!e.releasing&&!e.signaling&&!['queued','running'].includes(e.state.events[oldId]?.status),12000,100);
+        if(e.state.active&&e.state.active!==oldId)throw new Stop('retry_owner_changed');
+        e.releasing=true;claimed=true;
+        if(oldId&&e.state.active===oldId){const old=e.state.events[oldId];old.status='manual_retry_cancelled';old.release_reason='user_requested_retry';e.stage(old,'manual_retry_cancelled_at');e.reset(oldId,true);}
+        for(const pending of Object.values(e.state.events))if(pending.status==='global_waiting'){
+          pending.status='expired';pending.reason='user_requested_retry';pending.timestamps.finished_at=new Date().toISOString();
+        }
+        e.state.active=id;e.save();
+        if(this.paymentOwner&&this.slotForEvent(this.paymentOwner)===slot){this.paymentOwner=null;this.paymentClaimedAt=null;writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:null,claimed_at:null}),{mode:0o600});}
+        await slot.browser.manualRetryToPickup(item);
+        e.stage(item,'manual_retry_pickup_ready_at');
+        if(restore_only){item.status='manual_retry_ready';item.release_reason='user_restore_only';e.stage(item,'finished_at');e.reset(id,true);}
+        else{item.status='queued';e.save();}
+      }catch(error){
+        item.status='manual_review';item.reason=error instanceof Stop?error.code:'manual_retry_restore_failed';e.stage(item,'manual_retry_failed_at');
+        if(e.state.active===id)e.reset(id,true);
+      }finally{
+        if(claimed)e.releasing=false;
+        if(slot.reservedEvent===id)slot.reservedEvent=null;
+        slot.manualRetryEvent=null;
+      }
+      if(item.status==='queued'&&e.state.active===id)setImmediate(()=>e.execute(item));
+      else this.scheduleProfile(slot);
+    });
+    return {status:item.status,event_id:id,profile_label,restore_only};
+  }
   async reset(id){
     const slot=this.slotForEvent(id);
     const result=await (this.config.browser_backend==='safari'?this.resetSafari(slot,id):slot?.engine.reset(id)||false);
-    if(this.config.per_profile_requests&&result){if(this.paymentOwner===id)this.paymentOwner=null;slot.browser.stalledProfilePending=false;this.scheduleProfile(slot);}
+    if(this.config.per_profile_requests&&result){slot.browser.stalledProfilePending=false;this.scheduleProfile(slot);}
     if(this.globalFile&&this.globalLock.event_id===id&&(result||slot&&!slot.engine.state.active)){
       this.globalLock={event_id:null};this.saveGlobal();return true;
     }
@@ -229,6 +311,7 @@ export class ProfileRouter {
     for(let offset=0;offset<this.slots.length;offset++){
       const index=(start+offset)%this.slots.length,slot=this.slots[index];
       if(this.config.per_profile_requests&&(slot.engine.state.active||slot.engine.releasing||slot.engine.signaling||slot.reservedEvent))continue;
+      if(this.config.per_profile_requests&&this.latestRecentCandidate(null,nowMs,slot)){this.dispatchProfile(slot,nowMs);continue;}
       const engine=slot.engine,item=engine.state.events[engine.state.active];
       // A reserved event not yet in Engine is about to execute. Yield all I/O.
       if(this.globalLock?.event_id&&!this.slotForEvent(this.globalLock.event_id))return false;
@@ -259,9 +342,10 @@ export class ProfileRouter {
     return false;
   }
   health(){
-    const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],...s.engine.health()}));
+    if(this.config.per_profile_requests)this.expirePaymentLease();
+    const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],checkout_method:s.browser.config?.checkout_method||'apple_pay',guest_auto_place_order:s.browser.config?.guest_auto_place_order===true,...s.engine.health()}));
     this.expireWaiting();
-    return {status:'ok',...(this.config.per_profile_requests?{execution_policy:'per_configuration',global_locked:false,profile_lock_timeout_seconds:this.config.global_lock_timeout_seconds||60,stall_handoff_seconds:this.config.stall_handoff_seconds,payment_panel_owner:this.paymentOwner||null}:{}),...(this.config.listener_status?{listener_status:this.config.listener_status}:{}),busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.config.protect_stock_from_timeout!==false&&this.stockProtected(),protect_stock_from_timeout:this.config.protect_stock_from_timeout!==false,recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
+    return {status:'ok',...(this.config.per_profile_requests?{execution_policy:'per_configuration',global_locked:false,profile_lock_timeout_seconds:this.config.global_lock_timeout_seconds||60,stall_handoff_seconds:this.config.stall_handoff_seconds,payment_panel_owner:this.paymentOwner||null,payment_panel_cooldown_seconds:10,payment_panel_claimed_at:this.paymentOwner?this.paymentClaimedAt:null}:{}),...(this.config.listener_status?{listener_status:this.config.listener_status}:{}),busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.config.protect_stock_from_timeout!==false&&this.stockProtected(),protect_stock_from_timeout:this.config.protect_stock_from_timeout!==false,recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
   }
 }
 
@@ -298,7 +382,7 @@ export async function main() {
   if(cfg.drop_busy_events!==undefined&&typeof cfg.drop_busy_events!=='boolean')throw new Stop('invalid_busy_event_policy');
   if(cfg.recent_request_ttl_seconds!==undefined&&(!Number.isInteger(cfg.recent_request_ttl_seconds)||cfg.recent_request_ttl_seconds<0||cfg.recent_request_ttl_seconds>10))throw new Stop('invalid_recent_request_ttl');
   validateTimeoutPolicy(cfg);
-  const paths=[];let server,local,pollTimer,timeoutTimer,listeners;
+  const paths=[];let server,local,pollTimer,paymentTimer,timeoutTimer,listeners;
   function lock(dir){
     mkdirSync(dir,{recursive:true,mode:0o700});const path=join(dir,'receiver.lock');
     if(existsSync(path)){const pid=Number(readFileSync(path));try{process.kill(pid,0);throw new Stop('profile_already_running');}catch(e){if(e instanceof Stop||e.code!=='ESRCH')throw e;unlinkSync(path);}}
@@ -312,8 +396,9 @@ export async function main() {
       const endpoint=cfg.browser_backend==='safari'?s.safari_profile:s.cdp_endpoint;
       if(!endpoint||!/^[A-F]$/.test(s.label)||labels.has(s.label)||endpoints.has(endpoint)||states.has(state_dir))throw new Stop('duplicate_profile_slot');
       labels.add(s.label);endpoints.add(endpoint);states.add(state_dir);lock(state_dir);
-      const c={...cfg,slots:undefined,profile_label:s.label,preseeded_product_url:s.product_url,preseed_on_release:true,warm_product_pages:false,cdp_endpoint:s.cdp_endpoint,safari_profile:s.safari_profile,state_dir};
+      const c={...cfg,checkout_method:s.checkout_method||'apple_pay',guest_auto_place_order:s.guest_auto_place_order===true,guest_billing:s.guest_billing||cfg.guest_billing,guest_max_total_usd:s.guest_max_total_usd,slots:undefined,profile_label:s.label,preseeded_product_url:s.product_url,preseed_on_release:true,warm_product_pages:false,cdp_endpoint:s.cdp_endpoint,safari_profile:s.safari_profile,state_dir};
       if(cfg.single_active_request||cfg.per_profile_requests)Object.assign(c,{queue_while_busy:false,queue_when_browser_not_ready:false,auto_release_unavailable:cfg.release_global_on_unavailable===true,release_on_task_tab_close:false,handoff_idle_timeout_seconds:0,idle_bag_refresh_interval_seconds:0});
+      if(!['apple_pay','guest_credit'].includes(c.checkout_method)||(c.checkout_method==='guest_credit'&&(!['E','F'].includes(s.label)||!['Duo1024White','Duo1024Black'].includes(s.safari_profile))))throw new Stop('invalid_guest_slot');
       const browser=cfg.browser_backend==='safari'?new SafariPickupBrowser(c):new PickupBrowser(c);await browser.start();const engine=new Engine(c,browser);slots.push({...s,browser,engine});
     }
     const router=new ProfileRouter(cfg,slots);
@@ -341,12 +426,13 @@ export async function main() {
       };
       timeoutTimer=setInterval(()=>router.watchGlobalTimeout().catch(()=>{}),1000);timeoutTimer.unref();
     }
+    if(cfg.browser_backend==='safari'){let watchingPayment=false;paymentTimer=setInterval(async()=>{if(watchingPayment)return;watchingPayment=true;try{for(const slot of slots)await slot.engine.watchPaymentFailure();}catch{}finally{watchingPayment=false;}},1000);paymentTimer.unref();}
     if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());await router.maintainStandby();for(const slot of slots){if(!slot.engine.state.active&&!slot.engine.releasing&&!slot.engine.signaling)slot.browser.refreshIdleBag?.().catch(()=>{});await slot.engine.watchIdle();}}catch{}finally{polling=false;}},2000);pollTimer.unref();}
     ({server}=createReceiver(cfg,{ready:()=>true},secret,router));
     listeners=await openReceiverListeners(server,cfg,{onStatus:state=>console.info(JSON.stringify({event:'receiver_listener_status',...state,at:new Date().toISOString()}))});
     cfg.listener_status=listeners.state;
     console.log(JSON.stringify({status:'listening',mode:cfg.dry_run?'dry_run':'live',profiles:slots.map(s=>({label:s.label,product_url:s.product_url,aliases:s.aliases||[]}))}));
-    const stop=()=>{clearInterval(pollTimer);clearInterval(timeoutTimer);listeners?.close();server.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);process.exit(0);};process.on('SIGINT',stop);process.on('SIGTERM',stop);
-  }catch(e){clearInterval(pollTimer);clearInterval(timeoutTimer);listeners?.close();server?.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);throw e;}
+    const stop=()=>{clearInterval(pollTimer);clearInterval(paymentTimer);clearInterval(timeoutTimer);listeners?.close();server.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);process.exit(0);};process.on('SIGINT',stop);process.on('SIGTERM',stop);
+  }catch(e){clearInterval(pollTimer);clearInterval(paymentTimer);clearInterval(timeoutTimer);listeners?.close();server?.close();local?.close();for(const p of paths)if(existsSync(p))unlinkSync(p);throw e;}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(e=>{console.error(JSON.stringify({status:'stopped',reason:e instanceof Stop?e.code:'router_start_failed',error_code:typeof e.code==='string'?e.code:null,error_type:e.name}));process.exit(1);});

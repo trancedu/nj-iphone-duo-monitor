@@ -101,3 +101,18 @@ test('per-profile cancellation prevents later workflow actions after an awaited 
  await assert.rejects(()=>f.b.prepare({event_id:'cancel-me',product_url:url,detected_at:new Date().toISOString()},()=>{}),e=>e.code==='pickup_task_deadline');
  assert.equal(later,0);assert.equal(f.b.stalledProfilePending,true);
 });
+test('simulation suppresses Apple Pay for that event without changing production defaults',async()=>{
+ const f=fixture({open_apple_pay_sheet:true});await f.b.start();
+ await f.b.prepare({event_id:'simulation',product_url:url,simulation_no_payment:true},()=>{});
+ assert.equal(f.calls[0].c.open_apple_pay_sheet,false);
+ await f.b.prepare({event_id:'production',product_url:url},()=>{});
+ assert.equal(f.calls[1].c.open_apple_pay_sheet,true);assert.equal(f.b.config.open_apple_pay_sheet,true);
+});
+test('manual recovery selects pickup when checkout returned to delivery without navigating via Bag',async()=>{
+ const f=fixture({step_timeout_ms:500});let pickup=false;const ops=[];
+ const window={call:async(op,args)=>{ops.push(op);if(op==='snapshot')return {url:'https://secure7.store.apple.com/shop/apw/checkout?_s=Fulfillment-init'};
+ if(op==='standbyState')return {checkout:true,expired:false,pickup_ready:pickup,pickup_selected:pickup,protection:{contact_heading:false,payment_requested:false}};
+ if(op==='manualRetryPickup')return {returned:true};if(op==='pickup'){pickup=true;return {ready:true};}if(op==='armPickupStandby')return {ready:true,protected:false};throw Error(op);}};
+ f.b.ensurePage=async()=>{f.b.window=window;};
+ assert.equal((await f.b.manualRetryToPickup({event_id:'manual',product_url:url})).status,'standby_checkout');assert.equal(pickup,true);assert.equal(ops.filter(op=>op==='pickup').length,1);assert.equal(f.b.lastStandbyReady,true);
+});

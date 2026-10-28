@@ -90,3 +90,41 @@ class TailscaleTransportTests(unittest.TestCase):
             for url in ['http://100.128.0.0:8765/prepare','http://100.103.212.49:8765/prepare?token=x','http://user:pass@100.103.212.49:8765/prepare']:
                 with self.assertRaises(ValueError):b.Bridge({'endpoint':url},'test-secret-'*4,path,lambda _:None,autostart=False)
             with self.assertRaises(ValueError):b.Bridge({'endpoint':'http://100.103.212.49:8765/prepare'},'short',path,lambda _:None,autostart=False)
+
+class EndpointEnvironmentTests(unittest.TestCase):
+    def test_explicit_environment_replaces_remote_endpoint_without_mutating_file(self):
+        original={'enabled':True,'endpoint':'http://100.103.212.49:8765/prepare','secret_env':'PICKUP_SHARED_SECRET'}
+        resolved=b.endpoint_config(original,{'PICKUP_MAC_ENDPOINT':'http://127.0.0.1:8765/prepare'})
+        self.assertEqual(resolved['endpoint'],'http://127.0.0.1:8765/prepare')
+        self.assertEqual(original['endpoint'],'http://100.103.212.49:8765/prepare')
+        self.assertEqual(resolved['secret_env'],'PICKUP_SHARED_SECRET')
+    def test_empty_override_preserves_config_and_public_override_still_rejected(self):
+        original={'enabled':True,'endpoint':'http://127.0.0.1:8765/prepare'}
+        self.assertEqual(b.endpoint_config(original,{}),original)
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaises(ValueError):
+                b.Bridge(b.endpoint_config(original,{'PICKUP_MAC_ENDPOINT':'http://8.8.8.8:8765/prepare'}),'x'*40,folder,lambda _:None,autostart=False)
+
+class ImmediateWakeTests(unittest.TestCase):
+    def test_submit_signals_worker_without_sending_on_callers_thread(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bridge=b.Bridge({'endpoint':'http://127.0.0.1:8765/prepare'},'x'*40,folder,lambda _:None,autostart=False)
+            with patch.object(bridge,'request',side_effect=AssertionError('must remain asynchronous')):
+                self.assertFalse(bridge.wake.is_set())
+                self.assertTrue(bridge.submit(OFFER))
+                self.assertTrue(bridge.wake.is_set())
+    def test_full_queue_does_not_claim_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bridge=b.Bridge({'endpoint':'http://127.0.0.1:8765/prepare'},'x'*40,folder,lambda _:None,autostart=False)
+            for _ in range(128):self.assertTrue(bridge.submit(OFFER))
+            bridge.wake.clear();self.assertFalse(bridge.submit(OFFER));self.assertFalse(bridge.wake.is_set())
+
+class SimulationPaymentTests(unittest.TestCase):
+    def test_only_explicit_test_offer_preserves_payment_suppression(self):
+        with tempfile.TemporaryDirectory() as folder:
+            bridge=b.Bridge({'endpoint':'http://127.0.0.1:8765/prepare'},'x'*40,folder,lambda _:None,autostart=False)
+            normal=bridge.persist(OFFER,1000)
+            test=bridge.persist({**OFFER,'stock_event_id':'test','simulation_no_payment':True},1001)
+            with bridge.connect() as c:
+                records={row[0]:json.loads(row[1]) for row in c.execute('SELECT id,payload FROM events')}
+            self.assertNotIn('simulation_no_payment',records[normal]);self.assertTrue(records[test]['simulation_no_payment'])

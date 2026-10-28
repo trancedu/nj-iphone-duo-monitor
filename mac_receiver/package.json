@@ -7,7 +7,9 @@
   },
   "scripts": {
     "start": "node server.mjs --config receiver.local.json",
-    "test": "node --test --test-concurrency=2 tests/*.test.mjs"
+    "test": "node --test --test-concurrency=2 tests/*.test.mjs",
+    "test:release": "node --test --test-concurrency=2 tests/*.test.mjs",
+    "test:safari-live": "node safari/regression.mjs"
   },
   "dependencies": {
     "playwright": "1.64.1"

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {chromium} from 'playwright';
 import {Stop} from '../protocol.mjs';
 import {safariDOM} from '../safari/dom.mjs';
+import {paymentLifecycleDOM} from '../safari/payment.mjs';
 import {handoffActivity} from '../safari/idle.mjs';
 import {pickupLocationDOM} from '../pickup_location.mjs';
 import {prepareSafari,SafariWindow} from '../safari/shopping.mjs';
@@ -24,11 +25,11 @@ async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarg
   } else if(path==='/details')body=`<h1>Now fill out your pickup information.</h1><label><input type="radio" checked>I’ll pick it up</label>${['First Name','Last Name','Email Address','Phone Number'].map(label=>`<label>${label}<input></label>`).join('')}<button id="co-options-applePay" onclick="location.href='/payment'">Continue with Apple Pay</button>`;
   else{forbidden++;body='<h1>Forbidden</h1>';}
   if(path==='/details'&&walletSheet)body=body.replace("onclick=\"location.href='/payment'\"","onclick=\"window.walletRequests=(window.walletRequests||0)+1;document.getElementById('wallet-sheet').hidden=false\"")+'<div id="wallet-sheet" hidden>Confirm with Touch ID<button onclick="window.authorized=true">Authorize payment</button></div>';
-  if(path==='/checkout'&&wrongLocation)body=body.replace('<button>07094</button>',`<button onclick="document.getElementById('zip-editor').hidden=false;this.hidden=true">East Rutherford, NJ</button><div id="zip-editor" hidden><label>Zip Code or City, State<input role="combobox" value="East Rutherford, NJ"></label><button onclick="window.zipApplied=(window.zipApplied||0)+1;document.getElementById('store-target').disabled=false">Apply</button></div>`);
+  if(path==='/checkout'&&wrongLocation)body=body.replace('<button>07094</button>',`<button aria-label="Edit Zip Code or City, State, Brooklyn, NY" onclick="document.getElementById('zip-editor').hidden=false;this.hidden=true">Brooklyn, NY</button><div id="zip-editor" hidden><label>Zip Code or City, State<input role="combobox" value="Brooklyn, NY"></label><button onclick="window.zipApplied=(window.zipApplied||0)+1;document.getElementById('store-target').disabled=false">Apply</button></div>`);
   await route.fulfill({contentType:'text/html; charset=utf-8',body});
  });
  await page.goto('https://www.apple.com/shop/bag');
- const window={call:async(op,args)=>{try{if(['locationState','openLocation'].includes(op))return await page.evaluate(pickupLocationDOM,{open:op==='openLocation'});return await page.evaluate(['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:safariDOM,{op,args});}catch(e){if(e.message.includes('Execution context was destroyed')){e.code='safari_navigation_pending';}throw e;}},goto:url=>page.goto(url),reload:()=>page.reload(),foreground:async()=>{}};
+ const window={call:async(op,args)=>{try{if(['locationState','openLocation'].includes(op))return await page.evaluate(pickupLocationDOM,{open:op==='openLocation'});return await page.evaluate(['armIdle','idleState','claimIdleReturn'].includes(op)?handoffActivity:['observePaymentAttempt','paymentFailureState','recoverPaymentFailure','expirePaymentWindow'].includes(op)?paymentLifecycleDOM:safariDOM,{op,args});}catch(e){if(e.message.includes('Execution context was destroyed')){e.code='safari_navigation_pending';}throw e;}},goto:url=>page.goto(url),reload:()=>page.reload(),foreground:async()=>{}};
  return {window,page,counts:()=>({adds,checks,forbidden})};
 }
 test('Safari test path seeds once, picks second time, verifies contact and stops before final Pay',async t=>{
