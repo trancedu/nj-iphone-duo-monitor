@@ -26,7 +26,7 @@ class LiveMonitorTests(unittest.TestCase):
             root=Path(path);(root/'config.json').write_text(json.dumps(config));env=root/'empty.env';env.write_text('')
             args=argparse.Namespace(env_file=env,proxy_env_file=env,duration=.09,spacing=.03,workers=2,zip='07094')
             runtime=root/'runtime/proxy-monitor';runtime.mkdir(parents=True)
-            (runtime/'state.json').write_text(json.dumps({'sent':{'existing-key':123},'exits':{'old-ip':{'last_success_at':100}}}))
+            (runtime/'state.json').write_text(json.dumps({'sent':{'existing-key':123},'exits':{'old-ip':{'last_success_at':100}},'dataimpulse_live_blocked_until':time.time()+900,'dataimpulse_live':{'failure_blocked_until':time.time()+900}}))
             with patch.object(m,'ROOT',root),patch.object(d.signal,'signal'),patch.dict(d.os.environ,{},clear=True), \
                  patch.object(m,'notify_offer') as notify,patch.object(p,'private_proxy') as old_pool:
                 report=d.run(args,client_factory=Client)
@@ -38,18 +38,26 @@ class LiveMonitorTests(unittest.TestCase):
         self.assertEqual(report['counts_by_source']['dataimpulse'],{'http_200':len(calls)})
         self.assertGreater(report['daily_response_body_bytes'],0)
 
-    def test_health_failure_backoff_alert_is_capped_and_recovers_once(self):
+    def test_health_failures_keep_polling_notice_is_capped_and_recovers_once(self):
         state={};error={'result':'network_error'}
         with patch.object(m,'telegram') as tg:
             for _ in range(12):d.record_health(state,error,1000)
             self.assertEqual(tg.call_count,1)
-            self.assertGreaterEqual(state['dataimpulse_live_blocked_until'],1060)
+            self.assertEqual(state['dataimpulse_live_blocked_until'],0)
             d.record_health(state,{'result':'http_200'},1001)
             self.assertEqual(tg.call_count,2)
             d.record_health(state,{'result':'http_200'},1002)
             self.assertEqual(tg.call_count,2)
             self.assertEqual(state['dataimpulse_live']['consecutive_failures'],0)
             self.assertEqual(state['dataimpulse_live_blocked_until'],0)
+
+    def test_ordinary_errors_never_trigger_failure_backoff(self):
+        for result in ('http_503','http_541','network_error'):
+            state={'dataimpulse_live':{'failure_blocked_until':99999}}
+            with patch.object(m,'telegram'):
+                for i in range(30):d.record_health(state,{'result':result},1000+i)
+            self.assertEqual(state['dataimpulse_live_blocked_until'],0)
+            self.assertEqual(state['dataimpulse_live']['failure_blocked_until'],0)
 
     def test_retry_after_preserved(self):
         state={};d.record_health(state,{'result':'http_429','retry_after':900},1000)

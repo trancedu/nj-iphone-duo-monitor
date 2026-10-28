@@ -59,6 +59,8 @@ def health_notice(state,text,now):
 
 def record_health(state,result,now):
     live=state.setdefault('dataimpulse_live',{})
+    # Rotating proxies keep polling after ordinary failures; only explicit server waits pause admission.
+    live['failure_blocked_until']=0
     if result['result']=='http_200':
         live['consecutive_failures']=0
         live['failure_blocked_until']=0
@@ -73,10 +75,8 @@ def record_health(state,result,now):
     if result['result']=='http_429' or retry:
         live['server_blocked_until']=max(live.get('server_blocked_until',0),now+max(300,retry))
     if failures>=10:
-        live['failure_blocked_until']=max(live.get('failure_blocked_until',0),
-            now+min(900,60*2**min(failures-10,4)))
         live['outage_active']=True
-        live['outage_notified']=live.get('outage_notified',False) or health_notice(state,'⚠️ DataImpulse 库存监控连续失败，已退避；请检查代理或网络。不会持续弹出提醒。',now)
+        live['outage_notified']=live.get('outage_notified',False) or health_notice(state,'⚠️ DataImpulse 库存监控连续失败，仍按计划轮换查询；请检查代理或网络。不会持续弹出提醒。',now)
     state['dataimpulse_live_blocked_until']=max(live.get('server_blocked_until',0),live.get('failure_blocked_until',0))
 
 
@@ -94,7 +94,10 @@ def run(args,client_factory=DataImpulseClient):
     try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError:lock.close();raise RuntimeError('monitor_already_running') from None
     state_path=runtime/'state.json';state=json.loads(state_path.read_text()) if state_path.exists() else {}
-    state.setdefault('sent',{});state.setdefault('dataimpulse_live',{})
+    state.setdefault('sent',{});live=state.setdefault('dataimpulse_live',{})
+    # Migrate persisted pre-update failure backoff without discarding Retry-After/429 deadlines.
+    live['failure_blocked_until']=0
+    state['dataimpulse_live_blocked_until']=live.get('server_blocked_until',0)
     output=runtime/dt.datetime.now(m.TZ).strftime('%Y%m%d-%H%M%S');output.mkdir()
     counts=collections.Counter();started=time.monotonic();deadline=started+args.duration if args.duration else float('inf')
     report={'pid':os.getpid(),'status':'running','backend':'dataimpulse_only','uses_original_pool':False,
@@ -102,7 +105,7 @@ def run(args,client_factory=DataImpulseClient):
         'zip':zipcode,'monitored_skus':list(products),'monitored_products':[v['name'] for v in products.values()],
         'counts':{},'queries':0,'alerts_sent':0,'notification_errors':0,'response_body_bytes':0,
         'actual_exit_ip_verified':False,'unique_exits':None,'pool':[],
-        'dataimpulse':{'mode':'continuous','country':'us','transport':'urllib','socket_timeout_seconds':12},
+        'dataimpulse':{'mode':'continuous','failure_backoff_enabled':False,'country':'us','transport':'urllib','socket_timeout_seconds':12},
         'telegram_configured':bool(os.environ.get('TELEGRAM_BOT_TOKEN') and os.environ.get('TELEGRAM_CHAT_ID')),
         'output':str(output)}
     stop=False

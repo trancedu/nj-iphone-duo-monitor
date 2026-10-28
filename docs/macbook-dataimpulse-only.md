@@ -81,7 +81,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.trancedu.ipho
 
 `runtime/proxy-monitor/current.json` 应为 `backend=dataimpulse_only`、`uses_original_pool=false`、`target_start_spacing=1`，随后出现成功查询或明确退避。各运行目录 `queries.jsonl` 记录每次发起/完成时间、耗时、错误码、正文量；`pickup-bridge/delivery.jsonl` 记录接收器结果。不要从 `unique_exits=null` 推断没有 IP：rotating 的真实 Apple 请求出口未逐个核验。
 
-每次请求覆盖 256/512GB/1TB × 白/黑，12 家门店。每秒发起为目标，最多四项在途；慢请求、通知处理或退避会拉大实际间隔，不追赶突发。429/Retry-After 和连续错误的指数退避保留。Telegram、转发均沿用现有通道；按同一门店/配置的库存事件通知：持续有货不重复，确认无货后再次有货立即重新提醒，API 报错不算无货。没有 30 分钟抑制。
+每次请求覆盖 256/512GB/1TB × 白/黑，12 家门店。每秒发起为目标，最多四项在途；慢请求、通知处理或退避会拉大实际间隔，不追赶突发。429/Retry-After 的服务端等待保留；普通连续错误不再触发退避，仍按节奏轮换查询，故障通知继续限频。Telegram、转发均沿用现有通道；按同一门店/配置的库存事件通知：持续有货不重复，确认无货后再次有货立即重新提醒，API 报错不算无货。没有 30 分钟抑制。
 
 Mini 语音和 dashboard 是独立服务，本命令不迁移它们。Mac 接收器可继续自行通知；若要在 MacBook 部署语音，需要另改音频设备名，不能照抄 `Mac mini Speakers`。Mini dashboard 不会自动读到 MacBook runtime。
 
