@@ -20,7 +20,7 @@ export class ProfileRouter {
     this.onGlobalTimeout=onGlobalTimeout;
     if(config.guest_daily_order_limit===undefined&&slots.some(s=>s.browser.config?.checkout_method==='guest_credit'&&s.browser.config?.guest_auto_place_order))config.guest_daily_order_limit=4;
     if(config.guest_daily_order_limit!==undefined){
-      this.orderLedger=new OrderLedger(config.state_dir,{limit:config.guest_daily_order_limit});
+      this.orderLedger=new OrderLedger(config.state_dir,{limit:config.guest_daily_order_limit,allowUnknownRetry:config.guest_retry_unknown_orders===true});
       for(const slot of slots){
         for(const event of Object.values(slot.engine.state.events))this.orderLedger.importExisting(event);
         if(slot.engine.state.automation_blocked===true||Object.values(slot.engine.state.events).some(e=>e.rearm_pending===true&&slot.engine.state.recovery_pending!==e.event_id))slot.browser.automationBlocked=true;

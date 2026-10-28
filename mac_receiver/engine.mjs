@@ -36,7 +36,7 @@ export class Engine {
   health() {
     this.expireHeld();
     return {status:'ok',mode:this.config.dry_run?'dry_run':'live',
-      browser_ready:this.browser.ready(),recovery_pending:this.state.recovery_pending||null,recovery_retry_at:this.state.recovery_retry_at||null,automation_blocked:this.browser.automationBlocked===true,active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
+      browser_ready:this.browser.ready(),retry_unknown_orders:this.config.guest_retry_unknown_orders===true,recovery_pending:this.state.recovery_pending||null,recovery_retry_at:this.state.recovery_retry_at||null,automation_blocked:this.browser.automationBlocked===true,active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
       ...(this.config.idle_bag_refresh_interval_seconds?{idle_bag_refresh_interval_seconds:this.config.idle_bag_refresh_interval_seconds}:{}),
       ...(this.config.standby_page?{standby_page:this.config.standby_page,idle_checkout_refresh_interval_seconds:this.config.idle_checkout_refresh_interval_seconds,checkout_session_check_interval_seconds:this.config.checkout_session_check_interval_seconds||60,pickup_zip:this.config.pickup_zip}:{}),
       ...(this.browser.lastSessionCheck?{checkout_session_watch:this.browser.lastSessionCheck}:{}),
@@ -47,14 +47,16 @@ export class Engine {
     if(!item||this.state.active||this.releasing||this.signaling||nowMs<(this.state.recovery_retry_at||0))return false;
     this.releasing=true;this.stage(item,'automatic_recovery_retry_started_at');
     try{
-      if(item.recovery_after_success){
+      if(item.recovery_after_unknown){
+        const result=await this.browser.rearmAfterUnknownOrder(item,(name,detail)=>this.stage(item,name,detail));if(result?.observed_success){this.onGuestOutcome?.(item,'success');item.late_order_confirmed=true;}
+      }else if(item.recovery_after_success){
         await this.browser.rearmAfterGuestSuccess(item,(name,detail)=>this.stage(item,name,detail),{confirmedRecovery:true});item.rearm_pending=false;
       }else if(item.recovery_after_confirmed_failure){
         const state=await this.browser.inspectPaymentFailure(item);
         if(state.recoverable)await this.browser.recoverPaymentFailure(item);
         else await this.browser.restoreBeforeGuestSubmit(item);
       }else await this.browser.restoreBeforeGuestSubmit(item);
-      item.status=item.recovery_after_success?'order_confirmed':'recovered_waiting_for_signal';delete this.state.recovery_pending;delete this.state.recovery_retry_at;delete this.state.recovery_attempts;
+      item.status=item.recovery_after_success||item.late_order_confirmed?'order_confirmed':item.recovery_after_unknown?'order_result_unknown_released':'recovered_waiting_for_signal';delete this.state.recovery_pending;delete this.state.recovery_retry_at;delete this.state.recovery_attempts;
       this.stage(item,'automatic_recovery_pickup_ready_at');return true;
     }catch(error){
       item.reason=safeErrorCode(error,'recovery_retry_failed');this.state.recovery_attempts=(this.state.recovery_attempts||0)+1;
@@ -207,9 +209,20 @@ export class Engine {
       finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
     }
     if(state.outcome==='failed'&&state.recoverable===true){this.onGuestOutcome?.(item,'failed');return null;}
-    if(nowMs-Date.parse(item.timestamps.guest_order_requested_at)>=Math.min(this.config.guest_order_result_timeout_seconds||10,10)*1000&&item.status!=='order_result_unknown'){
+    if(nowMs-Date.parse(item.timestamps.guest_order_requested_at)>=Math.min(this.config.guest_order_result_timeout_seconds||10,10)*1000&&(item.status!=='order_result_unknown'||this.config.guest_retry_unknown_orders===true)){
       this.onGuestOutcome?.(item,'unknown');item.status='order_result_unknown';item.reason='order_result_not_confirmed_after_deadline';
       this.stage(item,'guest_order_result_unknown_at');void this.browser.captureFailureEvidence?.(item)?.catch(()=>{});
+      if(this.config.guest_retry_unknown_orders===true){
+        this.releasing=true;
+        try{
+          item.status='order_result_unknown_released';item.release_reason='user_accepts_duplicate_order_risk';item.recovery_after_unknown=true;this.reset(item.event_id,true);
+          const restored=await this.browser.rearmAfterUnknownOrder(item,(name,detail)=>this.stage(item,name,detail));
+          if(restored?.observed_success){this.onGuestOutcome?.(item,'success');item.status='order_confirmed';item.late_order_confirmed=true;}
+          this.stage(item,'unknown_order_pickup_restored_at');return true;
+        }catch(error){item.reason=safeErrorCode(error,'unknown_order_rearm_failed');this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+10000;this.stage(item,'unknown_order_rearm_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
+        finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
+      }
+
     }
     return false;
   }

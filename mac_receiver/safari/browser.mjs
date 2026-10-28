@@ -109,6 +109,16 @@ export class SafariPickupBrowser {
     const result=await prepareGuestPaymentSession(this.window,item.product_url,this.config,{allowReplenish:true,stage});
     this.lastStandbyReady=true;this.lastStandbyCheckAt=Date.now();this.lastIdleRefreshAt=Date.now();return result;
   }
+  async rearmAfterUnknownOrder(item,stage=()=>{}){
+    if(this.config.guest_retry_unknown_orders!==true)throw new Stop('unknown_order_retry_disabled');
+    const retired=await runGuestDOM(this.window,'retireGuestOrderUnknown',{mode:'production',submission_expected:true,event_id:item.event_id,expected_product:expectedProduct(item.product_url)});
+    if(!retired.retired)throw new Stop('unknown_order_retirement_not_verified');
+    stage('unknown_submission_retired_at');
+    this.lastStandbyReady=false;
+    const result=await restoreGuestReady(this.window,item.product_url,this.config,{stage});
+    this.lastStandbyReady=true;this.lastStandbyCheckAt=Date.now();this.lastIdleRefreshAt=Date.now();
+    return {...result,observed_success:retired.observed_success===true};
+  }
   async restoreBeforeGuestSubmit(item){
     this.lastStandbyReady=false;
     if(this.config.guest_auto_rearm&&item.reason==='prepared_payment_missing_manual_review'){

@@ -62,7 +62,7 @@ export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',
   if(window.__duoGuestContinueRequested)throw Error('guest_continue_already_requested');
   window.__duoGuestContinueRequested=true;b.click();return {clicked:true};
  }
- if(op==='guestOrderState'||op==='recoverGuestOrderFailure'||op==='retireGuestOrderSuccess'){
+ if(op==='guestOrderState'||op==='recoverGuestOrderFailure'||op==='retireGuestOrderSuccess'||op==='retireGuestOrderUnknown'){
   const key='duo_guest_order_requested_v1';let record=null;try{record=JSON.parse(sessionStorage.getItem(key)||'null');}catch{}
   const owned=!!record&&record.event_id===event_id&&record.product===expected_product;
   const headers=[...document.querySelectorAll('h1,h2')].filter(visible).map(e=>norm(e.textContent)).join(' ');
@@ -72,6 +72,15 @@ export function guestCheckoutDOM({op,billing={},card={number:'0000000000000000',
   const recoverable=failed&&u.pathname==='/shop/checkout'&&['Review','Review-init','Billing','Billing-init','PickupContact','PickupContact-init','Fulfillment','Fulfillment-init'].includes(step);
   const observation={observed:owned||submission_expected,requested_at:owned?record.at:null,phase:success?'guest_order_confirmed':failed?'guest_order_failed':'guest_order_pending',outcome:success?'success':failed?'failed':'unknown',closed:failed||success,recoverable};
   if(op==='guestOrderState')return observation;
+  if(op==='retireGuestOrderUnknown'){
+   if(mode!=='production'||!submission_expected||!event_id||!expected_product)throw Error('unknown_retry_not_authorized');
+   const retiredKey='duo_guest_failed_events_v1';let retired=[];try{retired=JSON.parse(sessionStorage.getItem(retiredKey)||'[]');}catch{}
+   if(record&&!owned)throw Error('unknown_retry_owner_changed');
+   if(!owned&&!retired.includes(event_id))throw Error('unknown_retry_submission_not_found');
+   if(!retired.includes(event_id)){retired.push(event_id);sessionStorage.setItem(retiredKey,JSON.stringify(retired.slice(-100)));}
+   if(owned)sessionStorage.removeItem(key);
+   return {retired:true,observed_success:success,outcome:success?'success':failed?'failed':'unknown'};
+  }
   if(op==='retireGuestOrderSuccess'){if(!success)throw Error('order_success_not_confirmed');sessionStorage.removeItem(key);return {retired:true};}
   if(!recoverable)return {recovered:false,...observation};
   const retiredKey='duo_guest_failed_events_v1';let retired=[];try{retired=JSON.parse(sessionStorage.getItem(retiredKey)||'[]');}catch{}

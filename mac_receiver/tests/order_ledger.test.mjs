@@ -74,3 +74,18 @@ test('successful order re-preparation failure retains success and retries setup 
  await e.watchPaymentFailure();assert.equal(e.state.active,null);assert.equal(item.status,'order_confirmed_rearm_waiting');assert.equal(e.state.recovery_pending,'one');assert.equal(e.browser.automationBlocked,undefined);
  await e.retryPendingRecovery(e.state.recovery_retry_at);assert.equal(item.status,'order_confirmed');assert.equal(item.rearm_pending,false);assert.equal(setups,2);
 });
+
+test('explicit duplicate-risk policy permits new same-SKU events but unknown submissions still consume four slots',t=>{
+ const {dir}=fixture(t);const ledger=new OrderLedger(dir,{allowUnknownRetry:true});
+ for(let i=0;i<4;i++){ledger.reserve(ev('id'+i,'same-sku'));ledger.settle('id'+i,'unknown');}
+ assert.equal(ledger.health().occupied,4);assert.equal(ledger.health().confirmed,0);assert.equal(ledger.unresolved('same-sku'),undefined);
+ assert.throws(()=>ledger.reserve(ev('id4','same-sku')),/daily_order_limit_reached/);assert.throws(()=>ledger.reserve(ev('id0','same-sku')),/order_already_reserved/);
+});
+test('accepted duplicate risk releases unknown order after ten seconds, restores readiness and keeps budget occupied',async t=>{
+ const {dir}=fixture(t);const ledger=new OrderLedger(dir,{allowUnknownRetry:true});let rearmed=0;
+ const item={...ev('one','sku'),status:'awaiting_user',timestamps:{guest_order_requested_at:new Date(Date.now()-11000).toISOString()}};ledger.reserve(item);
+ const e=new Engine({state_dir:join(dir,'engine'),checkout_method:'guest_credit',guest_retry_unknown_orders:true},{ready:()=>true,inspectPaymentFailure:async()=>({outcome:'unknown',observed:true}),rearmAfterUnknownOrder:async()=>{rearmed++;assert.equal(e.state.active,null);return {status:'standby_checkout'};}});
+ e.onGuestOutcome=(item,outcome)=>ledger.settle(item.event_id,outcome);e.state.active='one';e.state.events.one=item;
+ assert.equal(await e.watchPaymentFailure(),true);assert.equal(rearmed,1);assert.equal(e.state.active,null);assert.equal(item.status,'order_result_unknown_released');assert.equal(ledger.health().occupied,1);assert.equal(ledger.data.orders.one.outcome,'unknown');
+ ledger.reserve(ev('two','sku'));assert.equal(ledger.health().occupied,2);
+});

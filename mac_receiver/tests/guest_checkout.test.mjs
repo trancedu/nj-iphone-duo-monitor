@@ -238,3 +238,14 @@ test('pre-submit recovery clears stale pickup selection flags but never clears a
  await f.page.evaluate(()=>sessionStorage.setItem('duo_guest_order_requested_v1','{}'));
  await assert.rejects(()=>f.page.evaluate(guestCheckoutDOM,{op:'restoreGuestBeforeSubmit',expected_product:'iPhone 18 Pro 256GB Burgundy'}),/submission_must_be_reconciled/);
 });
+
+test('unknown order retirement requires explicit production intent, preserves outcome and prevents same-event resubmission',async t=>{
+ const f=await reviewFixture(t);await f.order({mode:'production'});
+ const args={op:'retireGuestOrderUnknown',event_id:'test-order',expected_product:'iPhone 18 Pro 256GB Burgundy',submission_expected:true};
+ await assert.rejects(()=>f.page.evaluate(guestCheckoutDOM,args),/unknown_retry_not_authorized/);
+ assert.equal((await f.page.evaluate(guestCheckoutDOM,{...args,mode:'production'})).outcome,'unknown');
+ assert.equal(await f.page.evaluate(()=>sessionStorage.getItem('duo_guest_order_requested_v1')),null);
+ await assert.rejects(()=>f.order({mode:'production'}),/event_retired/);
+ assert.equal(await f.page.evaluate(()=>window.orders),1);
+ await assert.rejects(()=>f.page.evaluate(guestCheckoutDOM,{...args,mode:'production',event_id:'other'}),/submission_not_found/);
+});
