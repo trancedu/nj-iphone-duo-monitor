@@ -25,12 +25,20 @@ class SpeechTests(unittest.TestCase):
             s=audio.Speaker(cfg,Path(directory)/'state.json',play=play)
             started=time.monotonic();self.assertTrue(s.submit(self.offer()))
             self.assertLess(time.monotonic()-started,.1);self.assertTrue(entered.wait(1))
-            self.assertFalse(s.submit(self.offer()));self.assertFalse(s.submit(self.offer(store_id='R095')))
+            self.assertFalse(s.submit(self.offer()));self.assertTrue(s.submit(self.offer(store_id='R095')))
             self.assertFalse(s.submit(self.offer(observed_at='2020-01-01T00:00:00+00:00')))
             release.set();s.pending.join()
             persisted=json.loads((Path(directory)/'state.json').read_text());self.assertIn('R755|black256|2026-10-27',persisted)
             s2=audio.Speaker(cfg,Path(directory)/'state.json',play=lambda *args:None)
             self.assertFalse(s2.submit(self.offer()))
+    def test_new_episode_of_same_configuration_speaks_immediately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            s=audio.Speaker({'max_age_seconds':10},Path(directory)/'state.json',play=lambda *args:None)
+            self.assertTrue(s.submit(self.offer(stock_event_id='episode-one')))
+            s.pending.join()
+            self.assertFalse(s.submit(self.offer(stock_event_id='episode-one')))
+            self.assertTrue(s.submit(self.offer(stock_event_id='episode-two')))
+            s.pending.join()
     def test_tail_skips_history_and_handles_partial_line(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'events.jsonl';path.write_text('{"old":true}\n')

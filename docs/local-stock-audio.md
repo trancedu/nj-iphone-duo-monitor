@@ -23,10 +23,9 @@ Edit `local_stock_audio.json`:
 - `rate`: macOS speech rate, currently 300; accepted range is clamped to 180–400.
 - `audio_device`: `Mac mini Speakers`.
 - `max_age_seconds`: 10. Old arrivals and expired queued speech are discarded.
-- `dedup_seconds`: 1800 per store/SKU/pickup date, matching the existing Telegram repeat window. Successful speech is remembered in a separate local file across restarts. This is independent of Telegram success/failure.
-- `phrase_cooldown_seconds`: 15. Same configuration at several stores close together is spoken once; different configurations can speak immediately in sequence.
+- No fixed repeat window or phrase cooldown. Each validated stock episode is spoken once; a confirmed negative observation ends that episode, and a subsequent positive starts a new ID immediately. Errors and missing observations never end an episode. Successful event IDs are remembered across speech-service restarts, independently of Telegram.
 
-Service startup begins at the existing log's end, so it does not replay historical stock. File replacement/truncation is handled and partial JSONL lines are retried. Queue length is limited to eight; old speech cannot accumulate indefinitely. Speech failures allow fresh observations to retry after the phrase cooldown. No store or payment choice is made by this service.
+Service startup begins at the existing log's end, so it does not replay historical stock. File replacement/truncation is handled and partial JSONL lines are retried. Queue length is limited to eight; old speech cannot accumulate indefinitely. Speech failures allow fresh observations of the same event to retry. No store or payment choice is made by this service.
 
 ## Commands
 

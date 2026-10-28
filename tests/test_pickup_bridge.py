@@ -19,7 +19,8 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(two.persist({**OFFER,'observed_at':'2026-10-26T12:00:01Z'},1001),eid)
             with two.connect() as c:payload=json.loads(c.execute('SELECT payload FROM events').fetchone()[0])
             self.assertEqual(payload['detected_at'],OFFER['observed_at'])
-            self.assertNotEqual(two.persist(OFFER,3000),eid)
+            self.assertEqual(two.persist(OFFER,3000),eid)
+            self.assertNotEqual(two.persist({**OFFER,'stock_event_id':'new-stock-episode'},1001),eid)
     def test_finite_retries_and_one_offline_notice_no_secret_in_logs(self):
         notices=[]
         with tempfile.TemporaryDirectory() as path:

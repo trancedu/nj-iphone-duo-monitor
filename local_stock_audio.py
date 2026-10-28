@@ -58,13 +58,12 @@ class Speaker:
         phrase = phrase_for(offer)
         if not phrase or not fresh(offer, now, self.config['max_age_seconds']):
             return False
-        key = '|'.join(str(offer.get(k, '')) for k in ('store_id', 'sku', 'date'))
+        episode = offer.get('stock_event_id')
+        key = episode or '|'.join(str(offer.get(k, '')) for k in ('store_id', 'sku', 'date'))
         if not all(offer.get(k) for k in ('store_id', 'sku', 'date')):
             return False
         with self.lock:
-            if now - self.sent.get(key, 0) < self.config['dedup_seconds']:
-                return False
-            if now - self.phrases.get(phrase, 0) < self.config['phrase_cooldown_seconds']:
+            if key in self.sent:
                 return False
             try:
                 self.pending.put_nowait((key, phrase, now))
@@ -84,9 +83,6 @@ class Speaker:
                 LOG.info('speech_started phrase=%s queue_ms=%.0f', phrase, (self.clock()-queued_at)*1000)
                 self.play(phrase, self.config)
                 with self.lock:
-                    cutoff = self.clock() - self.config['dedup_seconds']
-                    self.sent = {k: v for k, v in self.sent.items() if v >= cutoff}
-                    self.played = {k: v for k, v in self.played.items() if v >= cutoff}
                     self.played[key] = queued_at
                     temp = self.state_path.with_suffix('.tmp')
                     temp.write_text(json.dumps(self.played))

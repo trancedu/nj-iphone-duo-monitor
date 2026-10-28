@@ -202,7 +202,7 @@ def record_result(state, ip, now, error=None, cooldown=300):
         state['global_blocked_until'] = max(state.get('global_blocked_until', 0), now + delay)
 
 
-def parse_offers(raw, products, config, zipcode):
+def parse_offers(raw, products, config, zipcode, state=None, observed_at=None):
     override = m.environment_region()
     dynamic = override is not None and override['zip'] == zipcode
     region = override if dynamic else {'zip': zipcode, 'expected_stores': EXPECTED_07094 if zipcode == '07094' else []}
@@ -217,6 +217,9 @@ def parse_offers(raw, products, config, zipcode):
         for offer in found:
             offer['pickup_zip'] = zipcode
         offers.extend(found)
+    if state is not None:
+        pairs=[(r['storeId'],sku) for sku,payload in payloads.items() for r in payload['body']['content']]
+        offers=m.track_stock_episodes(state,offers,pairs,observed_at)
     return offers
 
 
@@ -357,7 +360,7 @@ def run(args):
                             fallback.finished(time.time(), success, body_bytes, retry_after)
                         try:
                             raw = future.result()
-                            offers = parse_offers(raw, products, config, args.zip)
+                            offers = parse_offers(raw, products, config, args.zip, state, dt.datetime.fromisoformat(event['at']).timestamp())
                             m.atomic_json(output / 'last-inventory.json', raw)
                             if is_fallback:
                                 finish_fallback(True)

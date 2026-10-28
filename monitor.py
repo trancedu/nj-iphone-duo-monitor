@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
@@ -175,10 +176,30 @@ def telegram(message):
 def offer_key(offer):
     return '|'.join(offer[k] for k in ('store_id','sku','date'))
 
+def track_stock_episodes(state, offers, observed_pairs, observed_at=None):
+    """Advance only validated store/SKU observations; errors and missing pairs do nothing."""
+    episodes = state.setdefault('stock_episodes', {})
+    stamp = observed_at or time.time()
+    accepted = set()
+    for sid, sku in observed_pairs:
+        pair = sid+'|'+sku
+        prior = episodes.get(pair, {})
+        if stamp < prior.get('observed_at', 0):
+            continue  # An older concurrent response must not rewind newer stock state.
+        matching = [o for o in offers if o['store_id']==sid and o['sku']==sku]
+        current = {offer_key(o) for o in matching}
+        ids = {key: prior.get('active', {}).get(key) or uuid.uuid4().hex for key in current}
+        episodes[pair] = {'observed_at': stamp, 'active': ids}
+        for offer in matching:
+            offer['stock_event_id'] = ids[offer_key(offer)]
+            accepted.add(id(offer))
+    return [o for o in offers if id(o) in accepted]
+
+
 def should_alert(offer, state, now):
-    # Model guard is independent of catalog discovery, including in test mode.
     if not offer['name'].startswith('iPhone Duo '): return False
-    return now - state.get('sent', {}).get(offer_key(offer), 0) >= 1800
+    key = offer.get('stock_event_id', offer_key(offer))
+    return key not in state.get('sent_episodes', {})
 
 def select_products(config):
     products = config['products']
@@ -243,6 +264,7 @@ def notify_offer(offer,config,state,runtime,dry_run,opened):
              '（美东）\n'+offer['quote']+'\n'+offer['url']+'\n请按此颜色、容量选择门店并确认库存。')
     if dry_run: LOG.info('dry-run offer %s %s %s',offer['sku'],offer['store'],offer['date']); return
     telegram(message)
+    state.setdefault('sent_episodes',{})[offer.get('stock_event_id',offer_key(offer))]=now
     state.setdefault('sent',{})[offer_key(offer)]=now
     atomic_json(runtime/'state.json',state)
     LOG.info('stock alert sent: %s %s %s',offer['sku'],offer['store_id'],offer['date'])
@@ -354,6 +376,7 @@ def run_cycle(client, config, state, runtime, dry_run=False):
                 coverage[sku]={'checked_at':checked,'observations':len(returned),'returned_stores':sorted(returned),
                                'unreported_stores':sorted(set(config['stores'])-returned),
                                'states':sorted({r['state'] for r in records})}
+                offers=track_stock_episodes(state,offers,[(r['storeId'],sku) for r in payload['body']['content']])
                 for offer in offers:
                     all_offers[offer_key(offer)]=offer
                     notify_offer(offer,config,state,runtime,dry_run,opened)

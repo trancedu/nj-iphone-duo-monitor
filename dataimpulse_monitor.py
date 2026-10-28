@@ -121,7 +121,7 @@ def run(args,client_factory=DataImpulseClient):
                     offers=[]
                     if event['result']=='http_200':
                         try:
-                            offers=parse_offers(raw,products,config,zipcode)
+                            offers=parse_offers(raw,products,config,zipcode,state,dt.datetime.fromisoformat(event['at']).timestamp())
                             event.update(stores=len(raw['body']['stores']),eligible_offers=len(offers))
                             m.atomic_json(output/'last-inventory.json',raw)
                         except Exception as error:

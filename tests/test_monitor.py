@@ -143,7 +143,7 @@ class MonitorTests(unittest.TestCase):
     def test_no_pro_alert(self):
         offer=m.parse_inventory(payload(),PRODUCTS,TODAY)[0][0]
         self.assertTrue(m.should_alert(offer,{},2000))
-        self.assertFalse(m.should_alert(offer,{'sent':{m.offer_key(offer):1900}},2000))
+        self.assertFalse(m.should_alert(offer,{'sent_episodes':{m.offer_key(offer):1900}},2000))
         offer['name']='iPhone 18 Pro Max 256GB Silver'
         self.assertFalse(m.should_alert(offer,{},2000))
     def test_failed_send_retries(self):

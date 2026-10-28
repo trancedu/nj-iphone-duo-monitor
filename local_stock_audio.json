@@ -2,7 +2,5 @@
   "audio_device": "Mac mini Speakers",
   "voice": "Tingting",
   "rate": 300,
-  "max_age_seconds": 10,
-  "dedup_seconds": 1800,
-  "phrase_cooldown_seconds": 15
+  "max_age_seconds": 10
 }

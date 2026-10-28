@@ -89,9 +89,9 @@ class Bridge:
             return False
 
     def persist(self, offer, now):
-        dedup = hashlib.sha256('|'.join(str(offer.get(k, '')) for k in ('store_id', 'sku', 'date')).encode()).hexdigest()
+        dedup = offer.get('stock_event_id') or hashlib.sha256('|'.join(str(offer.get(k, '')) for k in ('store_id', 'sku', 'date')).encode()).hexdigest()
         with self.connect() as c:
-            prior = c.execute('SELECT id FROM events WHERE dedup=? AND created>? ORDER BY created DESC LIMIT 1', (dedup, now-1800)).fetchone()
+            prior = c.execute('SELECT id FROM events WHERE dedup=? ORDER BY created DESC LIMIT 1', (dedup,)).fetchone()
             if prior:
                 return prior[0]
             event_id = uuid.uuid4().hex
