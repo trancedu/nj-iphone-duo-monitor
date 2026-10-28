@@ -28,7 +28,7 @@ The [independent local speaker](docs/local-stock-audio.md) announces fresh arriv
 
 ## Private dashboard
 
-The [read-only stock dashboard](docs/dashboard.md) shows live store/configuration status, availability history, disappearance evidence and request health. Open http://100.83.108.82:8890/iphone-duo-dashboard/ from the same Tailscale network. Its independent observer does not add Apple requests or change the monitor.
+The [read-only stock dashboard](docs/dashboard.md) shows live store/configuration status, grouped arrival waves with expandable raw segments, historical first observations, first-to-disappearance spans, and request health. Open http://100.83.108.82:8890/iphone-duo-dashboard/ from the same Tailscale network. Its independent observer does not add Apple requests or change the monitor.
 
 ## Current stock monitoring
 

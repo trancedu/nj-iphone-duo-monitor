@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only log/snapshot observer. No Apple, Telegram or browser requests."""
 import argparse
+import bisect
 import collections
 import datetime as dt
 import fcntl
@@ -134,33 +135,116 @@ class Collector:
         for path in sorted(self.logs.glob('20*/queries.jsonl')):self.ingest(path,'query')
         self.ingest(self.logs/'availability-events.jsonl','positive')
         self.snapshot()
-    def absence(self,sid,sku,after,before):
+    def absence_index(self):
+        # One indexed history pass replaces thousands of repeated SQLite scans per refresh.
+        direct=collections.defaultdict(lambda:{'times':[],'sources':[]})
+        for row in self.db.execute('SELECT sid,sku,t,source FROM negatives ORDER BY t'):
+            group=direct[(row['sid'],row['sku'])]
+            group['times'].append(row['t']);group['sources'].append(row['source'])
+        zero={}
+        for row in self.db.execute("SELECT at,finished,skus,covered FROM queries WHERE result='http_200' AND offers=0 ORDER BY finished"):
+            key=(row['skus'],row['covered'])
+            if key not in zero:
+                zero[key]={'skus':set(json.loads(row['skus'])),'stores':set(json.loads(row['covered'])),
+                           'times':[],'starts':[]}
+            group=zero[key];group['times'].append(row['finished']);group['starts'].append(row['at'])
+        return direct,list(zero.values())
+
+    def absence(self,sid,sku,after,before,index=None):
+        if index is not None:
+            direct,zero=index;candidates=[]
+            group=direct.get((sid,sku))
+            if group:
+                position=bisect.bisect_right(group['times'],after)
+                if position<len(group['times']) and group['times'][position]<before:
+                    candidates.append({'t':group['times'][position],'source':group['sources'][position]})
+            for group in zero:
+                if sid not in group['stores'] or sku not in group['skus']:continue
+                position=bisect.bisect_right(group['times'],after)
+                while position<len(group['times']) and group['times'][position]<before:
+                    if group['starts'][position]>after:
+                        candidates.append({'t':group['times'][position],'source':'query_empty'});break
+                    position+=1
+            return min(candidates,key=lambda row:row['t']) if candidates else None
         direct=self.db.execute('SELECT t,source FROM negatives WHERE sid=? AND sku=? AND t>? AND t<? ORDER BY t LIMIT 1',(sid,sku,after,before)).fetchone()
         zero=self.db.execute("SELECT finished AS t,'query_empty' AS source FROM queries WHERE result='http_200' AND offers=0 AND at>? AND finished<? AND instr(skus,?)>0 AND instr(covered,?)>0 ORDER BY finished LIMIT 1",(after,before,json.dumps(sku),json.dumps(sid))).fetchone()
         candidates=[dict(row) for row in (direct,zero) if row]
         return min(candidates,key=lambda row:row['t']) if candidates else None
     def periods(self,now):
+        index=self.absence_index()
         groups=collections.defaultdict(list)
-        for row in self.db.execute('SELECT * FROM positives ORDER BY t'):groups[(row['sid'],row['sku'])].append(dict(row))
+        for row in self.db.execute('SELECT * FROM positives ORDER BY t'):
+            groups[(row['sid'],row['sku'])].append(dict(row))
+        current={(row['sid'],row['sku']):dict(row) for row in self.db.execute('SELECT * FROM current')}
         periods=[]
         for (sid,sku),observations in groups.items():
-            active=None
+            latest=current.get((sid,sku))
+            # Treat the latest positive snapshot as another observation, not an extension
+            # across an arbitrary monitoring outage. Historical unknowns stay unknown.
+            if latest and latest['eligible'] and latest['t']>observations[-1]['t']:
+                observations.append({'t':latest['t'],'store':latest['store'],'state':latest['state'],
+                                     'pickup_date':latest['pickup_date']})
+            first_seen=observations[0]['t'];active=None;segments=[]
             for point in observations:
                 if active:
-                    closed=self.absence(sid,sku,active['last_seen'],point['t'])
+                    closed=self.absence(sid,sku,active['last_seen'],point['t'],index)
                     if closed:
-                        active.update(end=closed['t'],end_evidence=closed['source']);periods.append(active);active=None
+                        active.update(end=closed['t'],end_evidence=closed['source'],end_reason='confirmed_unavailable')
+                        segments.append(active);active=None
+                    elif point['t']-active['last_seen']>120:
+                        active['end_reason']='observation_gap'
+                        segments.append(active);active=None
                 if active is None:
-                    active={'store_id':sid,'sku':sku,'store':point['store'],'state':point['state'],'start':point['t'],'last_seen':point['t'],'end':None,'end_evidence':None,'pickup_dates':[],'observations':0}
+                    active={'store_id':sid,'sku':sku,'store':point['store'],'state':point['state'],
+                            'start':point['t'],'last_seen':point['t'],'end':None,'end_evidence':None,
+                            'end_reason':'unknown','pickup_dates':[],'observations':0}
                 active['last_seen']=max(active['last_seen'],point['t']);active['observations']+=1
-                if point['pickup_date'] and point['pickup_date'] not in active['pickup_dates']:active['pickup_dates'].append(point['pickup_date'])
+                if point['pickup_date'] and point['pickup_date'] not in active['pickup_dates']:
+                    active['pickup_dates'].append(point['pickup_date'])
             if active:
-                current=self.db.execute('SELECT * FROM current WHERE sid=? AND sku=?',(sid,sku)).fetchone()
-                if current and current['eligible']:active['last_seen']=max(active['last_seen'],current['t'])
-                closed=self.absence(sid,sku,active['last_seen'],now+1)
-                if closed:active.update(end=closed['t'],end_evidence=closed['source'])
-                periods.append(active)
+                closed=self.absence(sid,sku,active['last_seen'],now+1,index)
+                if closed:
+                    active.update(end=closed['t'],end_evidence=closed['source'],end_reason='confirmed_unavailable')
+                segments.append(active)
+            for number,segment in enumerate(segments,1):
+                segment.update(segment_number=number,historical_first_seen=first_seen,
+                    is_current=bool(latest and latest['eligible'] and segment['end'] is None and
+                                    segment is segments[-1] and latest['t']>=segment['start']-2),
+                    observed_span_seconds=round(segment['last_seen']-segment['start'],3),
+                    elapsed_seconds=round(segment['end']-segment['start'],3) if segment['end'] is not None else None)
+                periods.append(segment)
         return sorted(periods,key=lambda row:row['start'],reverse=True)
+
+    @staticmethod
+    def waves(periods,merge_seconds=120):
+        """Presentation grouping only: never erase negatives or claim continuous stock."""
+        groups=collections.defaultdict(list)
+        for period in sorted(periods,key=lambda row:row['start']):
+            groups[(period['store_id'],period['sku'])].append(period)
+        waves=[]
+        for records in groups.values():
+            active=None;number=0
+            for period in records:
+                merge=bool(active and active['end'] is not None and
+                           0<=period['start']-active['last_seen']<=merge_seconds)
+                if not merge:
+                    if active:waves.append(active)
+                    number+=1
+                    active={key:period[key] for key in ('store_id','sku','store','state','historical_first_seen')}
+                    active.update(wave_number=number,start=period['start'],segments=[],pickup_dates=[],observations=0)
+                active['segments'].append(period)
+                active.update(last_seen=period['last_seen'],end=period['end'],end_evidence=period['end_evidence'],
+                              end_reason=period['end_reason'],is_current=period['is_current'])
+                active['observations']+=period['observations']
+                for date in period['pickup_dates']:
+                    if date not in active['pickup_dates']:active['pickup_dates'].append(date)
+                active['elapsed_seconds']=round(active['end']-active['start'],3) if active['end'] is not None else None
+                active['observed_span_seconds']=round(active['last_seen']-active['start'],3)
+                active['segment_count']=len(active['segments'])
+                active['brief_unavailable_count']=len(active['segments'])-1
+            if active:waves.append(active)
+        return sorted(waves,key=lambda row:row['start'],reverse=True)
+
     def metrics(self,minutes,now):
         rows=[dict(row) for row in self.db.execute('SELECT * FROM queries WHERE finished>=? ORDER BY finished',(now-minutes*60,))]
         counts=collections.Counter(row['result'] for row in rows);good=[row for row in rows if row['result']=='http_200'];gaps=[b['finished']-a['finished'] for a,b in zip(good,good[1:])]
@@ -183,12 +267,15 @@ class Collector:
             else:b['errors']+=1
         chart=[{'at':t,'success':v['success'],'errors':v['errors'],'mean_latency':round(statistics.mean(v['latencies']),3) if v['latencies'] else None} for t,v in sorted(buckets.items())]
         safe_monitor={key:self.monitor.get(key) for key in ('status','backend','uses_original_pool','target_start_spacing','workers','zip','last_success_at','last_query_at','telegram_configured','alerts_sent','notification_errors')}
+        if not safe_monitor['backend'] and 'unique_exits' in self.monitor:
+            safe_monitor['backend']='clash'
+            safe_monitor['uses_original_pool']=True
         for key in ('last_success_at','last_query_at'):
             try:safe_monitor[key]=epoch(safe_monitor[key]) if safe_monitor[key] else None
             except (ValueError,TypeError):safe_monitor[key]=None
         result={'generated_at':now,'timezone':'America/New_York','monitor':safe_monitor,
             'metrics':{str(m):self.metrics(m,now) for m in (5,30,60)},'stores':current,'products':self.products,
-            'periods':periods,'queries':queries,'chart':chart,'collector':{'last_snapshot':float(self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone()[0]) if self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone() else None,'bad_lines':self.bad_lines},
+            'periods':periods,'waves':self.waves(periods),'history_rules':{'merge_seconds':120,'observation_gap_seconds':120},'queries':queries,'chart':chart,'collector':{'last_snapshot':float(self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone()[0]) if self.db.execute("SELECT value FROM meta WHERE key='last_snapshot'").fetchone() else None,'bad_lines':self.bad_lines},
             'evidence_notes':['库存范围：可选门店且取货日期在当天至未来三天。','query_empty：历史查询确认当次覆盖范围无符合条件库存，消失时刻为推断上界。','snapshot：独立观察到该门店/规格不再符合条件；查询失败不视为无货。','首次/最后观察不是物理补货/售罄精确时刻；未覆盖的历史结束时间保持未知。']}
         self.output.parent.mkdir(parents=True,exist_ok=True);temp=self.output.with_suffix('.tmp');temp.write_text(json.dumps(result,ensure_ascii=False,separators=(',',':')));temp.replace(self.output)
         return result
