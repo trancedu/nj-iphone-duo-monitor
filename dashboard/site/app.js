@@ -37,7 +37,7 @@ function filters(){
  $('store-filter').innerHTML='<option value="">所有门店（含历史）</option>'+[...options].sort((a,b)=>a[1].localeCompare(b[1])).map(([id,name])=>`<option value="${esc(id)}">${esc(name)}</option>`).join('');$('store-filter').value=selected;
 }
 function paginate(rows,page,prefix,render){
- const pages=Math.max(1,Math.ceil(rows.length/20));page=Math.min(page,pages-1);$(prefix+'-rows').innerHTML=rows.slice(page*20,(page+1)*20).map(render).join('')||`<tr><td colspan="${prefix==='history'?6:5}" class="empty">暂无匹配记录</td></tr>`;
+ const pages=Math.max(1,Math.ceil(rows.length/20));page=Math.min(page,pages-1);$(prefix+'-rows').innerHTML=rows.slice(page*20,(page+1)*20).map(render).join('')||`<tr><td colspan="${prefix==='history'?7:5}" class="empty">暂无匹配记录</td></tr>`;
  $(prefix+'-count').textContent=`共 ${rows.length} 条`;
  $(prefix+'-page').textContent=`${page+1} / ${pages}`;$(prefix+'-prev').disabled=page===0;$(prefix+'-next').disabled=page+1>=pages;return page;
 }
@@ -45,15 +45,20 @@ function history(){
  const sid=$('store-filter').value,cap=$('capacity').value,color=$('color').value,hours=Number($('range').value),limit=Date.now()/1000-hours*3600;
  const rows=data.periods.filter(p=>(!sid||p.store_id===sid)&&(!cap||data.products[p.sku]?.name.includes(cap))&&(!color||data.products[p.sku]?.name.includes(color))&&(!hours||(p.end||p.last_seen)>=limit));
  historyPage=paginate(rows,historyPage,'history',p=>{
+  const previous=p.previous_unavailable,following=p.next_unavailable;
+  const prev=previous?`${esc(fmtPrecise(previous.t))}<span class="sub">距首有 ${duration(p.pre_detection_gap_seconds)}</span><span class="sub">该次请求耗时 ${duration(previous.latency_seconds)}</span>`:'<span class="badge">缺少可信前次无货</span>';
   let end;
-  if(p.end!=null)end=`${esc(fmtPrecise(p.end))}<span class="sub"><span class="badge ${p.end_evidence==='query_empty'?'inferred':''}">${p.end_evidence==='query_empty'?'历史推断 · 时间上界':'确认不再符合自提条件'}</span></span>`;
+  if(following)end=`${esc(fmtPrecise(following.t))}<span class="sub">请求在末次有货后发出</span><span class="sub">耗时 ${duration(following.latency_seconds)}</span>`;
+  else if(p.end!=null)end=`${esc(fmtPrecise(p.end))}<span class="sub"><span class="badge inferred">无货快照 · 请求时序未核验</span></span>`;
   else{
    const current=data.stores.find(s=>s.store_id===p.store_id&&s.sku===p.sku),live=p.is_current&&current?.eligible&&age(current.observed_at)<20;
    end=`<span class="badge ${live?'yes':''}">${live?'最近仍可自提':p.end_reason==='observation_gap'?'观测中断 · 结束未知':'结束未知'}</span>`;
   }
   const lower=p.duration_lower_seconds??p.observed_span_seconds,upper=p.duration_upper_seconds;
-  const elapsed=`<b>${duration(lower)} ～ ${duration(upper)}</b><span class="sub">${upper==null?'上限未知：未确认本段结束':'下限：末次有货；上限：首次确认无货'}</span>`;
-  return `<tr><td><b>${esc(storeName(p.store))}</b><span class="sub">${esc(short(p.sku))}${monitored(p.sku)?'':' · 仅历史'}</span></td><td>${esc(fmtPrecise(p.start))}</td><td>${esc(fmtPrecise(p.last_seen))}</td><td>${end}</td><td>${elapsed}</td><td>${p.pickup_dates.map(esc).join('<br>')||'—'}</td></tr>`;
+  const reason=upper==null?(p.upper_unknown_reason==='missing_previous_negative'?'上限未知：缺少可信前次无货':'上限未知：缺少后次无货时序证据'):'下限：有货首末；上限：前后无货';
+  const timing=upper!=null?`前次无货请求发起 ${fmtPrecise(previous.request_started_at)}，返回 ${fmtPrecise(previous.t)}；若将这次请求耗时也纳入，宽松参考跨度 ${duration(p.request_envelope_upper_seconds)}。返回时间区间不是服务端库存的精确边界。`:'';
+  const elapsed=`<b title="${esc(timing)}">${duration(lower)} ～ ${duration(upper)}</b><span class="sub">${reason}</span>`;
+  return `<tr><td><b>${esc(storeName(p.store))}</b><span class="sub">${esc(short(p.sku))}${monitored(p.sku)?'':' · 仅历史'}</span></td><td>${prev}</td><td>${esc(fmtPrecise(p.start))}</td><td>${esc(fmtPrecise(p.last_seen))}</td><td>${end}</td><td>${elapsed}</td><td>${p.pickup_dates.map(esc).join('<br>')||'—'}</td></tr>`;
  });
  $('history-count').textContent=`共 ${rows.length} 段独立记录 · 确认无货即结束，不跨段合并`;
 }

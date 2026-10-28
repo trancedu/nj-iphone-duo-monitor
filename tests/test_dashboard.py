@@ -54,6 +54,7 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(len(periods),2);self.assertEqual(periods[1]['end'],103);self.assertEqual(periods[1]['last_seen'],101)
         self.assertIsNone(periods[0]['end'])
     def test_any_unavailable_splits_and_never_counts_time_across_segments(self):
+        self.query('before-first',at=97,finished=98)
         self.positive('a',100);self.positive('b',110)
         self.query('first-end',at=111,finished=112)
         self.positive('c',113);self.positive('d',120)
@@ -65,16 +66,51 @@ class DashboardTests(unittest.TestCase):
         # Neither the intervening no-stock gap nor the delayed negative response counts.
         self.assertEqual([p['observed_span_seconds'] for p in periods],[7,10])
         self.assertEqual([p['duration_lower_seconds'] for p in periods],[7,10])
-        self.assertEqual([p['duration_upper_seconds'] for p in periods],[27,12])
+        self.assertEqual([p['duration_upper_seconds'] for p in periods],[28,14])
         self.assertTrue(all('historical_first_seen' not in p for p in periods))
     def test_duplicate_records_same_instant_keep_zero_lower_and_known_upper(self):
+        self.query('previous',at=94,finished=95)
         self.positive('snapshot',100);self.positive('last-seen-copy',100);self.positive('event',100)
         self.query('end',at=101,finished=103)
         period=self.c.periods(110)[0]
         self.assertEqual(period['evidence_records'],3)
         self.assertNotIn('observations',period)
         self.assertEqual(period['duration_lower_seconds'],0)
-        self.assertEqual(period['duration_upper_seconds'],3)
+        self.assertEqual(period['duration_upper_seconds'],8)
+    def test_range_uses_surrounding_negatives_and_excludes_inflight_and_errors(self):
+        self.query('older-negative',at=89,finished=90)
+        self.query('previous-negative',at=94,finished=95)
+        self.query('closer-error','http_541',at=97,finished=98)
+        self.query('other-store',covered=['OTHER'],at=98,finished=99)
+        self.positive('a',100);self.positive('b',101)
+        self.query('old-inflight-negative',at=100.5,finished=102)
+        self.query('next-negative',at=103,finished=104)
+        self.query('later-negative',at=110,finished=115)
+        period=self.c.periods(120)[0]
+        self.assertEqual(period['previous_unavailable']['t'],95)
+        self.assertEqual(period['next_unavailable']['t'],104)
+        self.assertEqual(period['duration_lower_seconds'],1)
+        self.assertEqual(period['duration_upper_seconds'],9)
+        self.assertEqual(period['request_envelope_upper_seconds'],10)
+        self.assertEqual(period['pre_detection_gap_seconds'],5)
+        self.assertEqual(period['previous_unavailable']['latency_seconds'],1)
+    def test_missing_previous_negative_keeps_upper_unknown(self):
+        self.positive('a',100);self.query('end',at=101,finished=102)
+        period=self.c.periods(110)[0]
+        self.assertIsNone(period['duration_upper_seconds'])
+        self.assertEqual(period['upper_unknown_reason'],'missing_previous_negative')
+    def test_unverified_snapshot_does_not_bound_or_borrow_later_segment_negative(self):
+        self.query('previous',at=94,finished=95);self.positive('first',100)
+        self.c.db.execute('INSERT INTO negatives VALUES (?,?,?,?,?)',('snapshot',101,self.sid,self.sku,'snapshot'))
+        self.positive('second',102);self.query('later',at=103,finished=104)
+        periods=self.c.periods(110)
+        self.assertEqual(len(periods),2)
+        self.assertIsNone(periods[1]['next_unavailable'])
+        self.assertIsNone(periods[1]['duration_upper_seconds'])
+        self.assertFalse(periods[1]['end_request_timing_verified'])
+        self.assertIsNone(periods[0]['previous_unavailable'])
+        self.assertIsNone(periods[0]['duration_upper_seconds'])
+
     def test_unknown_end_does_not_use_now_as_upper_duration(self):
         self.positive('a',100);self.positive('b',101)
         period=self.c.periods(1000)[0]
