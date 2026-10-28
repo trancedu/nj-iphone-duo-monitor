@@ -35,11 +35,11 @@ The [read-only stock dashboard](docs/dashboard.md) shows live store/configuratio
 
 ## Current stock monitoring
 
-**Current Mini mode (2026-10-28): Clash subscription pool; DataImpulse remains stopped.** ZIP07094/12 stores, target dispatch every2 seconds, four workers, and a minimum60-second measured-IP interval are unchanged. Each request now batches **six** variants: 256GB/512GB/1TB × Star White/Night Sky; 2TB is excluded. Provider selection remains manual via `IPHONE_MONITOR_PROVIDER` / `--provider`, with paid fallback disabled in service-managed Clash mode. See [manual switching](docs/manual-monitor-provider.md) and the [1TB batch comparison/deployment](docs/one-tb-monitoring-2026-10-28.md).
+**Current deployment (2026-10-28): DataImpulse Data Center only**, target one request/second, four workers, ZIP07094/12 stores. Each request batches six variants: 256GB/512GB/1TB × Star White/Night Sky; 2TB excluded. No Clash polling. On October28 the Mini was manually paused until14:00 America/New_York; this is an operational schedule, not automatic provider switching. See [MacBook Data Center-only migration, private env examples and resource expectations](docs/macbook-dataimpulse-only.md). Provider changes remain manual.
 
 Telegram, Mini speech and Mac forwarding cover all six variants. The user confirmed the1TB frontend is configured; `mac_forward_skus` now includes both1TB SKUs as well as the original four.
 
-The earlier [DataImpulse-only deployment](docs/dataimpulse-live.md) is a retained alternative, not the currently selected source.
+The [DataImpulse-only implementation](docs/dataimpulse-live.md) describes pacing, persistent state and error backoff; the MacBook guide specifies the current Data Center credential file selection.
 
 - Production alerts: iPhone Duo only, connect to a carrier later.
 - Alert only when store selection is enabled AND the **pickup** upper date is today through three days ahead in America/New_York. Delivery dates never trigger an alert.

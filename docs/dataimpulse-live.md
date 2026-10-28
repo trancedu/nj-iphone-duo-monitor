@@ -5,14 +5,14 @@
 ## 调度与持久状态
 
 - 美国 Rotating，urllib，与一秒档基准相同的传输方式和 12 秒 socket 超时。
-- 目标每秒发起一次，每请求覆盖 07094 的 12 店和四款 256/512GB 黑白配置，最多四项在途。客户端在工作线程构造，避免拖慢主线程节奏。
+- 目标每秒发起一次，每请求覆盖 07094 的 12 店和六款 256/512GB/1TB 黑白配置，最多四项在途。客户端在工作线程构造，避免拖慢主线程节奏。
 - 慢请求占满名额时等待，不积累后突发追赶。因此实际发起与成功刷新间隔不是一秒硬保证。
 - 这次是持续服务，duration=0；不再使用混合试验的 200 次、绝对 expiry 或正文预算。旧试验状态保留审计，不会决定新模式是否运行。持续运行会产生付费流量，之前一秒档外推约 8 GB 正文/天仅作参考，不等于账单。
 - Rotating 的逐请求实际出口无法核验，记录 ip=null、actual_exit_ip_verified=false，不能报告“多少个健康 IP”或保证逐个实际 IP 一分钟不重复。
 
 保留 runtime/proxy-monitor/state.json 的 sent、旧 exits、既有 LAN outbox 和可用库存日志；增加 dataimpulse_live 子项记录健康状态、累计和当前生产模式当天正文量。每天字节只统计此生产入口，不是整个 DataImpulse 账户当天总账单。
 
-每个成功响应仍由 proxy_monitor.parse_offers（复用 monitor.regional_payloads/parse_inventory）检查店铺覆盖、四款配置、可选状态及近三天日期。有效 offer 仍走同一个 monitor.notify_offer：到货 Telegram、30 分钟去重、LAN 后台 outbox 和 Mac Profile 路由均未替换。
+每个成功响应仍由 proxy_monitor.parse_offers（复用 monitor.regional_payloads/parse_inventory）检查店铺覆盖、六款配置、可选状态及近三天日期。有效 offer 仍走同一个 monitor.notify_offer：到货 Telegram、按库存变化事件去重（没有固定时间抑制）、LAN 后台 outbox 和 Mac Profile 路由均未替换。
 
 ## 错误与重启
 
@@ -46,3 +46,5 @@ python3 deploy/proxy_service.py stop-live
 切换前 78 项 Python 测试通过，包括原池不被调用、共用通知/去重状态、429 与恢复区别、故障通知冷却及客户端构造异常安全处理。切换后的真实查询与当前统计见对应 runtime 目录；短期成功率和最大 gap 不构成长期保证。
 
 前台独立测试记录见 [三事件并发测试](frontend-concurrency-test-2026-10-27.md)：接收/排队正常，但两条 Safari 工作流超时，不能视为端到端通过。
+
+当前 Data Center 凭据选择及 MacBook 安装请以 [MacBook 迁移说明](macbook-dataimpulse-only.md) 为准。
