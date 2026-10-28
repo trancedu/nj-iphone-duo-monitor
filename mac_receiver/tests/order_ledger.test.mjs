@@ -32,10 +32,10 @@ test('Guest success releases only its own lock, settles quota and re-prepares wi
  e.onGuestOutcome=(item,outcome)=>ledger.settle(item.event_id,outcome);e.state.active='one';e.state.events.one=item;
  assert.equal(await e.watchPaymentFailure(),true);assert.equal(setups,1);assert.equal(item.status,'order_confirmed');assert.equal(item.rearm_pending,false);assert.equal(ledger.health().confirmed,1);assert.equal(e.state.active,null);
 });
-test('20-second unknown Guest result never reloads or retries and can later become confirmed',async t=>{
+test('ten-second unknown Guest result never reloads or retries and can later become confirmed',async t=>{
  const {dir}=fixture(t);let success=false,restores=0;
  const e=new Engine({state_dir:dir,checkout_method:'guest_credit',guest_order_result_timeout_seconds:20},{ready:()=>true,inspectPaymentFailure:async()=>({outcome:success?'success':'unknown',observed:true}),recoverPaymentFailure:async()=>{restores++;}});
- const time=Date.now()-21000;e.state.active='one';e.state.events.one={...ev('one'),status:'awaiting_user',timestamps:{guest_order_requested_at:new Date(time).toISOString()}};
+ const time=Date.now()-11000;e.state.active='one';e.state.events.one={...ev('one'),status:'awaiting_user',timestamps:{guest_order_requested_at:new Date(time).toISOString()}};
  await e.watchPaymentFailure();assert.equal(e.state.events.one.status,'order_result_unknown');assert.equal(e.state.active,'one');assert.equal(restores,0);
  success=true;assert.equal(await e.watchPaymentFailure(Date.now()+1100),true);assert.equal(e.state.active,null);assert.equal(restores,0);
 });
@@ -64,7 +64,7 @@ test('repeated restoration failures back off and never replay a purchase',async 
  const {dir}=fixture(t);let attempts=0;
  const e=new Engine({state_dir:dir,checkout_method:'guest_credit'},{ready:()=>true,restoreBeforeGuestSubmit:async()=>{attempts++;throw Error('safari_apple_event_failed');}});
  e.state.events.one={...ev('one'),status:'recovery_pending',timestamps:{}};e.state.recovery_pending='one';
- await e.retryPendingRecovery(1000);assert.equal(e.state.recovery_retry_at,61000);await e.retryPendingRecovery(61000);assert.equal(e.state.recovery_retry_at,181000);assert.equal(attempts,2);assert.equal(e.state.active,null);
+ await e.retryPendingRecovery(1000);assert.equal(e.state.recovery_retry_at,21000);await e.retryPendingRecovery(21000);assert.equal(e.state.recovery_retry_at,61000);assert.equal(attempts,2);assert.equal(e.state.active,null);
 });
 
 test('successful order re-preparation failure retains success and retries setup without another order',async t=>{

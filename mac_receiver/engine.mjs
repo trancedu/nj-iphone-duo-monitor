@@ -59,7 +59,7 @@ export class Engine {
     }catch(error){
       item.reason=safeErrorCode(error,'recovery_retry_failed');this.state.recovery_attempts=(this.state.recovery_attempts||0)+1;
       // Retrying page preparation is rate-limited, never a repeated purchase.
-      this.state.recovery_retry_at=nowMs+Math.min(180000,30000*2**Math.min(3,this.state.recovery_attempts));
+      this.state.recovery_retry_at=nowMs+Math.min(180000,10000*2**Math.min(5,this.state.recovery_attempts));
       this.stage(item,'automatic_recovery_retry_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;
     }finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
   }
@@ -143,7 +143,7 @@ export class Engine {
         item.status='pre_submit_failed';item.release_reason=item.reason;this.reset(item.event_id,true);
         if(item.reason!=='daily_order_limit_reached')await this.browser.restoreBeforeGuestSubmit(item);
         this.stage(item,'pre_submit_pickup_restored_at');
-      }catch(error){item.status='recovery_pending';item.reason=safeErrorCode(error,'pre_submit_restore_failed');this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+30000;this.stage(item,'pre_submit_restore_failed_at',{kind:'guest_recovery',error_code:item.reason});}
+      }catch(error){item.status='recovery_pending';item.reason=safeErrorCode(error,'pre_submit_restore_failed');this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+10000;this.stage(item,'pre_submit_restore_failed_at',{kind:'guest_recovery',error_code:item.reason});}
       finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
       return;
     }
@@ -203,11 +203,11 @@ export class Engine {
           item.rearm_pending=false;this.stage(item,'post_order_pickup_ready_at');
         }
         return true;
-      }catch(error){item.status='order_confirmed_rearm_waiting';item.reason=safeErrorCode(error,'post_order_setup_failed');item.recovery_after_success=true;this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+30000;this.stage(item,'post_order_setup_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
+      }catch(error){item.status='order_confirmed_rearm_waiting';item.reason=safeErrorCode(error,'post_order_setup_failed');item.recovery_after_success=true;this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+10000;this.stage(item,'post_order_setup_failed_at',{kind:'guest_recovery',error_code:item.reason});return false;}
       finally{this.releasing=false;this.onProfileReleased?.(item.event_id);}
     }
     if(state.outcome==='failed'&&state.recoverable===true){this.onGuestOutcome?.(item,'failed');return null;}
-    if(nowMs-Date.parse(item.timestamps.guest_order_requested_at)>=(this.config.guest_order_result_timeout_seconds||20)*1000&&item.status!=='order_result_unknown'){
+    if(nowMs-Date.parse(item.timestamps.guest_order_requested_at)>=Math.min(this.config.guest_order_result_timeout_seconds||10,10)*1000&&item.status!=='order_result_unknown'){
       this.onGuestOutcome?.(item,'unknown');item.status='order_result_unknown';item.reason='order_result_not_confirmed_after_deadline';
       this.stage(item,'guest_order_result_unknown_at');void this.browser.captureFailureEvidence?.(item)?.catch(()=>{});
     }
@@ -237,7 +237,7 @@ export class Engine {
       await this.browser.recoverPaymentFailure(item);
       item.status='payment_failed_returned';this.stage(item,'payment_failure_pickup_restored_at');released=true;return true;
     }catch{
-      item.status=this.config.checkout_method==='guest_credit'?'recovery_pending':'manual_review';item.reason='payment_failure_restore_failed';if(this.config.checkout_method==='guest_credit'){this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+30000;item.recovery_after_confirmed_failure=true;}this.save();this.log(item,'payment_failure_restore_failed');return false;
+      item.status=this.config.checkout_method==='guest_credit'?'recovery_pending':'manual_review';item.reason='payment_failure_restore_failed';if(this.config.checkout_method==='guest_credit'){this.state.recovery_pending=item.event_id;this.state.recovery_retry_at=Date.now()+10000;item.recovery_after_confirmed_failure=true;}this.save();this.log(item,'payment_failure_restore_failed');return false;
     }finally{this.releasing=false;if(released)(this.onPaymentFailureReleased||this.onProfileReleased)?.(item.event_id);else if(this.state.active!==item.event_id)this.onProfileReleased?.(item.event_id);}
   }
   async watchIdle(nowMs=Date.now()) {

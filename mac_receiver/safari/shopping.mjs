@@ -1,5 +1,6 @@
 // Shared deterministic Safari workflow and standalone test CLI.
 import {spawn} from 'node:child_process';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import {createHash} from 'node:crypto';
 import {readFileSync,mkdirSync,writeFileSync,openSync,closeSync,unlinkSync} from 'node:fs';
 import {resolve,dirname,join} from 'node:path';
@@ -12,15 +13,20 @@ import {signalSafari} from './feedback.mjs';
 import {classifyStores,sanitizeObservation} from './diagnostics.mjs';
 import {productURL,expectedProduct,Stop} from '../protocol.mjs';
 import {chooseTimeWindow,validatePickupDetails,pickupDetailsFromEnv} from '../pickup_details.mjs';
+const stepDeadline=new AsyncLocalStorage();
+export const MAX_PICKUP_STEP_MS=10000;
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const asString=s=>'"'+s.replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('\n','\\n').replaceAll('\r','\\r')+'"';
 export async function appleScript(source) {
+  const remaining=(stepDeadline.getStore()??Infinity)-Date.now();
+  if(remaining<=0)throw new Stop('safari_step_timeout');
   return new Promise((ok,bad)=>{
     const child=spawn('/usr/bin/osascript',['-'],{stdio:['pipe','pipe','pipe']});let output='',error='';
-    const timer=setTimeout(()=>child.kill(),10000);
+    let timedOut=false;
+    const timer=setTimeout(()=>{timedOut=true;child.kill('SIGKILL');},Math.min(MAX_PICKUP_STEP_MS,remaining));
     child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>error+=b);
     child.on('error',()=>{clearTimeout(timer);bad(new Stop('safari_apple_events_unavailable'));});
-    child.on('close',code=>{clearTimeout(timer);code===0?ok(output.trim()):bad(new Stop(error.includes('(-25211)')?'safari_accessibility_permission_required':error.includes('Allow JavaScript')?'safari_javascript_permission_required':error.includes('profile_changed')?'safari_profile_changed':error.includes('single_test_tab_required')?'safari_single_test_tab_required':'safari_apple_event_failed'));});
+    child.on('close',code=>{clearTimeout(timer);code===0?ok(output.trim()):bad(new Stop(timedOut?'safari_step_timeout':error.includes('(-25211)')?'safari_accessibility_permission_required':error.includes('Allow JavaScript')?'safari_javascript_permission_required':error.includes('profile_changed')?'safari_profile_changed':error.includes('single_test_tab_required')?'safari_single_test_tab_required':'safari_apple_event_failed'));});
     child.stdin.end(source);
   });
 }
@@ -56,13 +62,20 @@ export class SafariWindow {
   }
 
 }
-export async function waitFor(fn,timeout=20000,interval=100) {
-  const start=Date.now();
-  do {try{const value=await fn();if(value)return value;}catch(e){if(!['safari_navigation_pending','safari_apple_event_failed','safari_script_response_unrecognized'].includes(e.code))throw e;}await pause(interval);}while(Date.now()-start<timeout);
-  throw new Stop('safari_step_timeout');
+export async function waitFor(fn,timeout=MAX_PICKUP_STEP_MS,interval=100) {
+  const deadline=Math.min(Date.now()+Math.min(timeout,MAX_PICKUP_STEP_MS),stepDeadline.getStore()??Infinity);
+  return stepDeadline.run(deadline,async()=>{
+    do {
+      try{const value=await fn();if(value&&Date.now()<=deadline)return value;}
+      catch(e){if(!['safari_navigation_pending','safari_apple_event_failed','safari_script_response_unrecognized'].includes(e.code))throw e;}
+      const remaining=deadline-Date.now();if(remaining<=0)break;
+      await pause(Math.min(interval,remaining));
+    }while(Date.now()<deadline);
+    throw new Stop('safari_step_timeout');
+  });
 }
 // Polls cooperatively: a thrown handoff ends this workflow before any later clicks.
-export async function waitForPickupProgress(fn,{startedAt=Date.now(),stallMs=10000,shouldYield,abandon,stage=()=>{},timeout=20000,now=Date.now}={}){
+export async function waitForPickupProgress(fn,{startedAt=Date.now(),stallMs=10000,shouldYield,abandon,stage=()=>{},timeout=10000,now=Date.now}={}){
   return waitFor(async()=>{
     const value=await fn();if(value)return value;
     if(shouldYield&&now()-startedAt>=stallMs&&await shouldYield()){
@@ -79,14 +92,14 @@ export function activePickupLocationAccepted(location,zip){
 // Only the unselected fulfillment page is eligible for standby refresh.
 export async function prepareSafariStandby(window,url,config,{refresh=false,stage=()=>{},sessionContinuationAttempted=false,progress,activeRequest=false}={}){
   const product=expectedProduct(url),call=(op,args={})=>window.call(op,{product,...args});
-  const wait=fn=>progress?progress(fn,Date.now()):waitFor(fn,config.step_timeout_ms??20000);
+  const wait=fn=>progress?progress(fn,Date.now()):waitFor(fn,Math.min(config.step_timeout_ms??10000,10000));
   let state=await call('standbyState');
   stage(state.abandoned?'standby_entry_abandoned_at':state.expired?'standby_entry_expired_at':state.session_warning?'standby_entry_session_warning_at':state.ready?'standby_entry_ready_at':'standby_entry_unprepared_at');
   if(config.urgent_same_configuration_retry&&(!state.checkout||state.expired||state.session_warning))throw new Stop('urgent_retry_checkout_not_ready');
   if(state.session_warning){
     if(!sessionContinuationAttempted){
       await call('continueShoppingSession');
-      try{await waitFor(async()=>!(await call('standbyState')).session_warning,Math.min(config.step_timeout_ms??20000,2000),250);}
+      try{await waitFor(async()=>!(await call('standbyState')).session_warning,Math.min(Math.min(config.step_timeout_ms??10000,10000),2000),250);}
       catch(error){if(!(error instanceof Stop&&error.code==='safari_step_timeout'))throw error;}
     }
     state=await call('standbyState');
@@ -154,8 +167,9 @@ export async function prepareSafariStandby(window,url,config,{refresh=false,stag
 export async function prepareSafari(window,url,config,{seedOnly=false,stage=()=>{},shouldYieldToRecent,tryClaimApplePay,mayForeground=()=>true}={}) {
   config={...config,pickup_details:pickupDetailsFromEnv(config.pickup_details)};
   productURL(url);const product=expectedProduct(url);const call=(op,args={})=>window.call(op,{product,...args});
-  const timeout=config.step_timeout_ms??20000;
-  if(!Number.isInteger(timeout)||timeout<100||timeout>60000)throw new Stop('invalid_safari_step_timeout');
+  const requestedTimeout=config.step_timeout_ms??10000;
+  if(!Number.isInteger(requestedTimeout)||requestedTimeout<100||requestedTimeout>60000)throw new Stop('invalid_safari_step_timeout');
+  const timeout=Math.min(requestedTimeout,MAX_PICKUP_STEP_MS);
   const wait=fn=>waitFor(fn,timeout);
   stage('started_at');
   const warm=config.standby_page==='pickup_checkout'&&!seedOnly;
@@ -339,7 +353,7 @@ async function main() {
     if(action==='standby'&&argv.includes('--adopt-test-standby')){
       if(!/^PickupTest[A-Za-z0-9_-]*$/.test(window.profile))throw new Stop('test_profile_required');
       if(argv.includes('--return-to-pickup'))await window.returnToTestPickup();
-      await waitFor(async()=>{const s=await window.call('standbyState',{product:expectedProduct(url)});return s.pickup_ready&&s.pickup_selected;},config.step_timeout_ms??20000);
+      await waitFor(async()=>{const s=await window.call('standbyState',{product:expectedProduct(url)});return s.pickup_ready&&s.pickup_selected;},Math.min(config.step_timeout_ms??10000,10000));
       await window.call('armPickupStandby',{product:expectedProduct(url),explicit_test_reset:true});
     }
     if(action==='prepare'&&argv.includes('--require-standby')){
@@ -350,7 +364,7 @@ async function main() {
     if(action==='standby'&&argv.includes('--return-to-standby')){
       // Explicit standalone test reset; never invoked by incoming inventory.
       await window.goto('https://www.apple.com/shop/bag');
-      await waitFor(async()=>{const s=await window.call('snapshot');return s.ready==='complete'&&s.bag.length&&s.bag.every(i=>i.title&&i.quantity);},config.step_timeout_ms??20000);
+      await waitFor(async()=>{const s=await window.call('snapshot');return s.ready==='complete'&&s.bag.length&&s.bag.every(i=>i.title&&i.quantity);},Math.min(config.step_timeout_ms??10000,10000));
     }
     result=action==='standby'?await prepareSafariStandby(window,url,config,{stage}):await prepareSafari(window,url,config,{seedOnly:action==='seed',stage});
     timestamps.finished_at=new Date().toISOString();save();
