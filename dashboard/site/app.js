@@ -1,6 +1,5 @@
 'use strict';
-let data, windowMinutes='30', historyPage=0, queryPage=0, fetching=false, historyMode='waves';
-const expandedWaves=new Set();
+let data, windowMinutes='30', historyPage=0, queryPage=0, fetching=false;
 const duration=seconds=>{if(seconds==null)return '—';if(seconds<1)return '不足 1 秒';const n=Math.round(seconds),h=Math.floor(n/3600),m=Math.floor(n%3600/60),v=n%60;return (h?h+' 时 ':'')+(m?m+' 分 ':'')+v+' 秒';};
 const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const dateTime=new Intl.DateTimeFormat('zh-CN',{timeZone:'America/New_York',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
@@ -42,24 +41,19 @@ function paginate(rows,page,prefix,render){
 }
 function history(){
  const sid=$('store-filter').value,cap=$('capacity').value,color=$('color').value,hours=Number($('range').value),limit=Date.now()/1000-hours*3600;
- const waves=historyMode==='waves', source=waves?(data.waves||[]):data.periods;
- $('history-start-label').textContent=waves?'本波最早观测':'本段最早观测';
- const rows=source.filter(p=>(!sid||p.store_id===sid)&&(!cap||data.products[p.sku]?.name.includes(cap))&&(!color||data.products[p.sku]?.name.includes(color))&&(!hours||(p.end||p.last_seen)>=limit));
- function endLabel(p){
-  if(p.end!=null)return `${esc(fmt(p.end))}<span class="sub"><span class="badge ${p.end_evidence==='query_empty'?'inferred':''}">${p.end_evidence==='query_empty'?'历史推断 · 时间上界':'快照确认 · 不再符合条件'}</span></span>`;
-  const current=data.stores.find(s=>s.store_id===p.store_id&&s.sku===p.sku),live=p.is_current&&current?.eligible&&age(current.observed_at)<20;
-  return `<span class="badge ${live?'yes':''}">${live?'最近仍可自提':p.end_reason==='observation_gap'?'观测中断 · 结束未知':'结束未知'}</span>`;
- }
+ const rows=data.periods.filter(p=>(!sid||p.store_id===sid)&&(!cap||data.products[p.sku]?.name.includes(cap))&&(!color||data.products[p.sku]?.name.includes(color))&&(!hours||(p.end||p.last_seen)>=limit));
  historyPage=paginate(rows,historyPage,'history',p=>{
-  const key=p.store_id+'|'+p.sku+'|'+p.start, count=p.segment_count||1;
-  const label=waves?`第 ${p.wave_number} 波 · ${count} 段观测`:`第 ${p.segment_number} 段观测`;
-  const elapsed=`<b>${p.observed_span_seconds===0?'0 秒':'约 '+duration(p.observed_span_seconds)}</b><span class="sub">${p.observed_span_seconds===0?'仅单个时间点，实际时长未知':count>1?'含短暂无货；仅截至末次有货':'仅截至末次有货'}</span>`;
-  let result=`<tr><td><b>${esc(storeName(p.store))}</b><span class="sub">${esc(short(p.sku))}${monitored(p.sku)?'':' · 仅历史'}</span><span class="sub">${label}</span>${waves&&count>1?`<button class="expand-wave" data-wave="${esc(key)}" aria-expanded="${expandedWaves.has(key)}">${expandedWaves.has(key)?'收起':'展开'} ${count} 段 ↓</button>`:''}</td><td>${esc(fmt(p.start))}<span class="sub">历史最早 ${esc(fmt(p.historical_first_seen))}</span></td><td>${esc(fmt(p.last_seen))}<span class="sub">${p.observations} 次有货观察</span></td><td>${endLabel(p)}</td><td>${elapsed}</td><td>${p.pickup_dates.map(esc).join('<br>')||'—'}</td></tr>`;
-  if(waves&&expandedWaves.has(key)&&count>1)result+=`<tr class="wave-detail"><td colspan="6"><div class="wave-caption">本波保留 ${count} 个原始观测段，中间 ${p.brief_unavailable_count} 次确认过不符合近期自提条件；首末有货跨度不包含最后一次有货之后等待确认无货的时间，也不代表连续有货。</div><div class="segment-list">${p.segments.map(segment=>`<div><span>第 ${segment.segment_number} 段</span><span>${esc(fmt(segment.start))} → 末次有货 ${esc(fmt(segment.last_seen))}</span><span>${endLabel(segment)}</span><b>${segment.observed_span_seconds===0?'0 秒 · 单次时间点':'约 '+duration(segment.observed_span_seconds)}</b></div>`).join('')}</div></td></tr>`;
-  return result;
+  let end;
+  if(p.end!=null)end=`${esc(fmt(p.end))}<span class="sub"><span class="badge ${p.end_evidence==='query_empty'?'inferred':''}">${p.end_evidence==='query_empty'?'历史推断 · 时间上界':'确认不再符合自提条件'}</span></span>`;
+  else{
+   const current=data.stores.find(s=>s.store_id===p.store_id&&s.sku===p.sku),live=p.is_current&&current?.eligible&&age(current.observed_at)<20;
+   end=`<span class="badge ${live?'yes':''}">${live?'最近仍可自提':p.end_reason==='observation_gap'?'观测中断 · 结束未知':'结束未知'}</span>`;
+  }
+  const span=p.observed_span_seconds;
+  const elapsed=`<b>${span===0?'0 秒':'约 '+duration(span)}</b><span class="sub">${span===0?'仅单个时间点，实际时长未知':'末次有货 − 首次有货'}</span>`;
+  return `<tr><td><b>${esc(storeName(p.store))}</b><span class="sub">${esc(short(p.sku))}${monitored(p.sku)?'':' · 仅历史'}</span></td><td>${esc(fmt(p.start))}</td><td>${esc(fmt(p.last_seen))}<span class="sub">${p.observations} 次有货观察</span></td><td>${end}</td><td>${elapsed}</td><td>${p.pickup_dates.map(esc).join('<br>')||'—'}</td></tr>`;
  });
- $('history-count').textContent=waves?`共 ${rows.length} 波 · ${rows.reduce((n,p)=>n+p.segment_count,0)} 段原始观测`:`共 ${rows.length} 段 · 未做波次合并`;
- $('history-rows').querySelectorAll('[data-wave]').forEach(button=>button.onclick=()=>{const key=button.dataset.wave;expandedWaves.has(key)?expandedWaves.delete(key):expandedWaves.add(key);history();});
+ $('history-count').textContent=`共 ${rows.length} 段独立记录 · 确认无货即结束，不跨段合并`;
 }
 function queries(){
  const f=$('result-filter').value, rows=data.queries.filter(q=>!f||(f==='errors'?q.result!=='http_200':q.result===f));
@@ -73,7 +67,6 @@ async function refresh(){
 }
 $('refresh').onclick=refresh;
 $('windows').querySelectorAll('button').forEach(b=>b.onclick=()=>{windowMinutes=b.dataset.window;$('windows').querySelectorAll('button').forEach(c=>c.classList.toggle('active',c===b));if(data)metrics();});
-$('history-modes').querySelectorAll('button').forEach(button=>button.onclick=()=>{historyMode=button.dataset.mode;historyPage=0;$('history-modes').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b===button));if(data)history();});
 $('search').oninput=()=>data&&stores();
 ['store-filter','capacity','color','range'].forEach(id=>$(id).onchange=()=>{historyPage=0;if(data)history();});
 $('clear-filters').onclick=()=>{['store-filter','capacity','color'].forEach(id=>$(id).value='');$('range').value='0';historyPage=0;if(data)history();};

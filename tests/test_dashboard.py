@@ -45,34 +45,29 @@ class DashboardTests(unittest.TestCase):
         periods=self.c.periods(110)
         self.assertEqual(len(periods),2);self.assertEqual(periods[1]['end'],103);self.assertEqual(periods[1]['last_seen'],101)
         self.assertIsNone(periods[0]['end'])
-    def test_short_flicker_waves_keep_true_first_last_and_all_segments(self):
+    def test_any_unavailable_splits_and_never_counts_time_across_segments(self):
         self.positive('a',100);self.positive('b',110)
         self.query('first-end',at=111,finished=112)
-        self.positive('c',120);self.positive('d',130)
-        self.query('last-end',at=131,finished=132)
-        periods=self.c.periods(140);waves=self.c.waves(periods)
-        self.assertEqual(len(periods),2);self.assertEqual(len(waves),1)
-        wave=waves[0]
-        self.assertEqual((wave['start'],wave['last_seen'],wave['end']),(100,130,132))
-        self.assertEqual(wave['elapsed_seconds'],32)
-        # Visible conservative span excludes the final negative-confirmation delay.
-        self.assertEqual(wave['observed_span_seconds'],30)
-        self.assertEqual([p['observed_span_seconds'] for p in wave['segments']],[10,10])
-        self.assertEqual(wave['segment_count'],2);self.assertEqual(wave['brief_unavailable_count'],1)
-        self.assertEqual([p['segment_number'] for p in wave['segments']],[1,2])
-        self.assertEqual(wave['historical_first_seen'],100)
-    def test_long_gap_is_new_wave_but_keeps_historical_first(self):
-        self.positive('a',100);self.query('first-end',at=101,finished=102)
-        self.positive('b',300);self.query('second-end',at=301,finished=302)
-        waves=self.c.waves(self.c.periods(310))
-        self.assertEqual(len(waves),2);self.assertEqual(waves[0]['wave_number'],2)
-        self.assertEqual(waves[0]['start'],300);self.assertEqual(waves[0]['historical_first_seen'],100)
+        self.positive('c',113);self.positive('d',120)
+        self.query('last-end',at=121,finished=140)
+        periods=self.c.periods(150)
+        self.assertEqual(len(periods),2)
+        self.assertEqual((periods[1]['start'],periods[1]['last_seen'],periods[1]['end']),(100,110,112))
+        self.assertEqual((periods[0]['start'],periods[0]['last_seen'],periods[0]['end']),(113,120,140))
+        # Neither the intervening no-stock gap nor the delayed negative response counts.
+        self.assertEqual([p['observed_span_seconds'] for p in periods],[7,10])
+        self.assertTrue(all('historical_first_seen' not in p for p in periods))
+    def test_single_positive_after_negative_has_zero_observed_span(self):
+        self.positive('a',100);self.query('end',at=101,finished=102);self.positive('b',103)
+        periods=self.c.periods(110)
+        self.assertEqual(len(periods),2)
+        self.assertEqual([p['observed_span_seconds'] for p in periods],[0,0])
     def test_unobserved_long_gap_is_not_continuous_stock_or_a_known_end(self):
         self.positive('a',100);self.positive('b',500)
-        periods=self.c.periods(510);waves=self.c.waves(periods)
-        self.assertEqual(len(periods),2);self.assertEqual(len(waves),2)
+        periods=self.c.periods(510)
+        self.assertEqual(len(periods),2)
         self.assertEqual(periods[1]['end_reason'],'observation_gap')
-        self.assertIsNone(periods[1]['end']);self.assertIsNone(periods[1]['elapsed_seconds'])
+        self.assertIsNone(periods[1]['end']);self.assertEqual(periods[1]['observed_span_seconds'],0)
     def test_current_snapshot_does_not_bridge_old_unknown_period(self):
         self.positive('a',100)
         self.c.db.execute('INSERT INTO current VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -80,11 +75,11 @@ class DashboardTests(unittest.TestCase):
         periods=self.c.periods(510)
         self.assertEqual(len(periods),2);self.assertFalse(periods[1]['is_current']);self.assertTrue(periods[0]['is_current'])
         self.assertEqual(periods[1]['last_seen'],100);self.assertIsNone(periods[1]['end'])
-    def test_waves_never_merge_different_store_or_configuration(self):
+    def test_segments_never_merge_different_store_or_configuration(self):
         self.positive('a',100);self.query('first-end',at=101,finished=102)
         self.c.db.execute('INSERT INTO positives VALUES (?,?,?,?,?,?,?,?)',
             ('other',105,'R095',self.sku,'2026-10-27','Apple Fifth Avenue','NY','Today'))
-        self.assertEqual(len(self.c.waves(self.c.periods(110))),2)
+        self.assertEqual(len(self.c.periods(110)),2)
 
     def test_incremental_ingest_ignores_incomplete_line_and_is_idempotent(self):
         directory=self.root/'runtime/proxy-monitor/20261027-000000';directory.mkdir(parents=True)
@@ -101,6 +96,7 @@ class DashboardTests(unittest.TestCase):
     def test_export_whitelists_monitor_fields_and_sanitizes_text(self):
         self.c.monitor={'status':'running','secret':'never-export-this','proxy_url':'private'}
         result=self.c.export();self.assertNotIn('secret',result['monitor']);self.assertNotIn('proxy_url',result['monitor'])
+        self.assertNotIn('waves',result);self.assertFalse(result['history_rules']['merge_across_unavailable'])
         self.assertEqual(m.clean('<b>Available</b> &amp; today'),'Available & today')
 
 if __name__=='__main__':unittest.main()
