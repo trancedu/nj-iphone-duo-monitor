@@ -310,6 +310,9 @@ export class ProfileRouter {
     const e=slot.engine;
     if(slot.manualRetryEvent)return {status:'manual_retry_preparing',event_id:slot.manualRetryEvent,profile_label,already_running:true,restore_only:e.state.events[slot.manualRetryEvent]?.restore_only};
     if((e.state.active||null)!==expected_event_id)throw new Stop('retry_owner_changed');
+    const current=e.state.events[e.state.active];
+    if(restore_only&&current&&['queued','running'].includes(current.status)&&Date.now()-Date.parse(current.timestamps.received_at)<(this.config.global_lock_timeout_seconds||60)*1000)throw new Stop('task_still_running');
+    if(this.externalMaintenance(slot))throw new Stop('external_setup_in_progress');
     const oldId=e.state.active,id='manual-retry-'+randomUUID(),at=new Date().toISOString();
     const item={event_id:id,product_url:slot.product_url,detected_at:at,manual_retry:true,restore_only,status:'manual_retry_preparing',timestamps:{detected_at:at,received_at:at}};
     item.fingerprint=fingerprint(item);e.state.events[id]=item;e.save();e.log(item,'manual_retry_requested');
@@ -329,13 +332,14 @@ export class ProfileRouter {
         }
         e.state.active=id;e.save();
         if(this.paymentOwner&&this.slotForEvent(this.paymentOwner)===slot){this.paymentOwner=null;this.paymentClaimedAt=null;writeFileSync(this.paymentLeaseFile,JSON.stringify({event_id:null,claimed_at:null}),{mode:0o600});}
-        await slot.browser.manualRetryToPickup(item);
+        item.restore_result=await slot.browser.manualRetryToPickup(item,(name,detail)=>e.stage(item,name,detail));
         e.state.automation_blocked=false;slot.browser.automationBlocked=false;
+        for(const prior of Object.values(e.state.events))if(prior.rearm_pending&&prior.status?.startsWith('order_confirmed'))prior.rearm_pending=false;
         e.stage(item,'manual_retry_pickup_ready_at');
         if(restore_only){item.status='manual_retry_ready';item.release_reason='user_restore_only';e.stage(item,'finished_at');e.reset(id,true);}
         else{item.status='queued';e.save();}
       }catch(error){
-        item.status='manual_review';item.reason=error instanceof Stop?error.code:'manual_retry_restore_failed';e.stage(item,'manual_retry_failed_at');
+        item.status='manual_review';item.reason=safeErrorCode(error,'manual_retry_restore_failed');e.stage(item,'manual_retry_failed_at');
         if(e.state.active===id)e.reset(id,true);
       }finally{
         if(claimed)e.releasing=false;

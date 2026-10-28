@@ -2,6 +2,7 @@
 import {SafariWindow,listSafariWindows,prepareSafari,prepareSafariStandby,waitFor} from './shopping.mjs';
 import {runGuestSignal,prepareGuestStandby,runGuestDOM} from './guest_checkout.mjs';
 import {captureFailureEvidence} from './failure_evidence.mjs';
+import {restoreGuestReady} from './guest_restore.mjs';
 import {prepareGuestPaymentSession} from './guest_setup.mjs';
 import {signalSafari} from './feedback.mjs';
 import {appendDiagnostic,safeErrorCode} from './diagnostics.mjs';
@@ -75,8 +76,12 @@ export class SafariPickupBrowser {
       for(const [operation,metric] of metrics)observe('browser_operation_summary_at',{kind:'browser_operation',operation,...metric});
     }
   }
-  async manualRetryToPickup(item){
+  async manualRetryToPickup(item,stage=()=>{}){
     this.lastStandbyReady=false;await this.ensurePage();
+    if(this.config.checkout_method==='guest_credit'){
+      const result=await restoreGuestReady(this.window,item.product_url,this.config,{stage});
+      this.stalledProfilePending=false;this.lastStandbyReady=true;this.lastStandbyCheckAt=Date.now();this.lastIdleRefreshAt=Date.now();return result;
+    }
     const product=expectedProduct(item.product_url),state=await this.window.call('standbyState',{product});
     const snapshot=await this.window.call('snapshot'),u=new URL(snapshot.url);
     if(state.expired||u.pathname==='/shop/bag'){

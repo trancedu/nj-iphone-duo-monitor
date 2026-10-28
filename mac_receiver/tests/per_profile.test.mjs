@@ -261,3 +261,9 @@ test('external setup lease blocks only its configuration and expires when its ow
  writeFileSync(file,JSON.stringify({pid:2147483647}));assert.equal(f.router.externalMaintenance(f.slots[0]),false);assert.equal(existsSync(file),false);
  f.router.dispatchProfile(f.slots[0]);await turn();assert.deepEqual(f.calls,['ready-black','paused-white']);
 });
+
+test('restore-only desktop action does not interrupt a fresh inventory runner',async t=>{
+ const f=fixture(t);f.router.accept(f.event('live-stock'));await turn();
+ assert.throws(()=>f.router.manualRetry({profile_label:'A',expected_event_id:'live-stock',restore_only:true}),/task_still_running/);
+ assert.equal(f.slots[0].browser.abortEventId,undefined);assert.equal(f.slots[0].engine.state.active,'live-stock');
+});

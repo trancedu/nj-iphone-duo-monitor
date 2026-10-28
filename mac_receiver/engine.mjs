@@ -68,7 +68,7 @@ export class Engine {
     return {code:status==='busy'?409:status==='queue_full'?429:status==='browser_not_ready'?503:202,body:this.public(item)};
   }
   public(item) {
-    return {event_id:item.event_id,status:item.status,reason:item.reason,timestamps:item.timestamps,...(item.feedback?{feedback:item.feedback}:{}),...(item.signal_feedback?{signal_feedback:item.signal_feedback}:{}),...(item.last_observation?{last_observation:item.last_observation,diagnostic_count:item.diagnostic_count}:{}),...(item.payment_watch?{payment_watch:item.payment_watch}:{}),...(item.idle_watch_state?{idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at}:{}),...(item.release_reason?{release_reason:item.release_reason,reset_at:item.reset_at}:{})};
+    return {event_id:item.event_id,status:item.status,reason:item.reason,timestamps:item.timestamps,...(item.restore_result?{restore_result:item.restore_result}:{}),...(item.feedback?{feedback:item.feedback}:{}),...(item.signal_feedback?{signal_feedback:item.signal_feedback}:{}),...(item.last_observation?{last_observation:item.last_observation,diagnostic_count:item.diagnostic_count}:{}),...(item.payment_watch?{payment_watch:item.payment_watch}:{}),...(item.idle_watch_state?{idle_watch_state:item.idle_watch_state,last_user_activity_at:item.last_user_activity_at}:{}),...(item.release_reason?{release_reason:item.release_reason,reset_at:item.reset_at}:{})};
   }
   stage(item,name,detail) {
     if(name==='guest_order_requested_at'&&this.beforeGuestSubmission)this.beforeGuestSubmission(item);
