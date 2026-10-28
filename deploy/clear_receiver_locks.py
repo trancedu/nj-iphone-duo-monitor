@@ -140,6 +140,22 @@ def main():
                     event.setdefault('timestamps', {})['finished_at'] = now
                     cancelled += 1
             save(path, state)
+        # Hard deadlines stop the controller first, then release ownership
+        # before browser restoration. Slow Apple pages cannot prolong the lock.
+        if args.expired_event and cfg.get('protect_stock_from_timeout') is False:
+            if owner_slot in paths:
+                path = paths[owner_slot]
+                state = json.loads(path.read_text())
+                if state.get('active') == args.expired_event:
+                    event = state['events'][args.expired_event]
+                    event['status'] = 'lock_timeout'
+                    event['reason'] = 'global_lock_timeout'
+                    event['release_reason'] = 'global_lock_timeout'
+                    event.setdefault('timestamps', {})['timeout_released_at'] = now
+                    event['reset_at'] = now
+                    state['active'] = None
+                    save(path, state)
+            save(gate, {'event_id': None, 'released_at': now, 'reason': 'global_lock_timeout'})
         node = next((a for a in argv if Path(a).name in ('node', 'nodejs') and Path(a).is_file()), None) or shutil.which('node')
         if not node:
             raise RuntimeError('node_not_found_receiver_left_stopped')
@@ -163,7 +179,7 @@ def main():
                 continue
             path = paths[row['slot']]
             state = json.loads(path.read_text())
-            active = state.get('active')
+            active = state.get('active') or (args.expired_event if args.expired_event in state.get('events', {}) else None)
             if active:
                 event = state['events'][active]
                 event['reset_at'] = now
@@ -203,14 +219,14 @@ def expired_owner(config, lock, event_id, now=None):
         return False
     try:
         claimed = dt.datetime.fromisoformat(lock['claimed_at'].replace('Z', '+00:00'))
-        # Available stock and all later handoff stages override automatic expiry.
+        # Legacy configurations may protect stock; hard-deadline mode does not.
         for entry in config.get('slots', []):
             directory = Path(entry['state_dir'])
             if not directory.is_absolute():
                 directory = ROOT / directory
             state = json.loads((directory / 'events.json').read_text())
             item = state.get('events', {}).get(event_id)
-            if item and (item.get('status') == 'awaiting_user' or any(k in item.get('timestamps', {}) for k in ('pickup_stock_found_at', 'store_selected_at', 'time_selected_at', 'pickup_time_at', 'details_navigation_at', 'contact_verified_at', 'handoff_at'))):
+            if config.get('protect_stock_from_timeout', True) and item and (item.get('status') == 'awaiting_user' or any(k in item.get('timestamps', {}) for k in ('pickup_stock_found_at', 'store_selected_at', 'time_selected_at', 'pickup_time_at', 'details_navigation_at', 'contact_verified_at', 'handoff_at'))):
                 return False
         return ((now or dt.datetime.now(dt.timezone.utc)) - claimed).total_seconds() >= seconds
     except (KeyError, ValueError, TypeError, OSError):

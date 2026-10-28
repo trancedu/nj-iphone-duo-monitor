@@ -36,10 +36,12 @@ class ExpiredOwnerTests(unittest.TestCase):
             state.write_text(json.dumps({'events':{'found':{'status':'manual_review','timestamps':{'pickup_stock_found_at':'2026-10-27T10:00:00Z'}}}}))
             config={'global_lock_timeout_seconds':60,'slots':[{'state_dir':folder}]}
             self.assertFalse(expired_owner(config,{'event_id':'found','claimed_at':'2026-10-27T09:00:00Z'},'found',dt.datetime(2026,10,27,12,tzinfo=dt.timezone.utc)))
+            config['protect_stock_from_timeout'] = False
+            self.assertTrue(expired_owner(config,{'event_id':'found','claimed_at':'2026-10-27T09:00:00Z'},'found',dt.datetime(2026,10,27,12,tzinfo=dt.timezone.utc)))
 
 
 class AutomaticCleanupTests(unittest.TestCase):
-    def exercise(self, restore_ok=True, replace_owner=False):
+    def exercise(self, restore_ok=True, replace_owner=False, hard=False):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             root = home / 'receiver'
@@ -61,7 +63,7 @@ class AutomaticCleanupTests(unittest.TestCase):
                 slots.append({'label': label, 'state_dir': str(state_dir)})
             untouched = (root/'runtime-profiles/A/events.json').read_bytes()
             config = root / 'receiver.router.local.json'
-            config.write_text(json.dumps({'slots': slots, 'state_dir': str(gate_dir), 'global_lock_timeout_seconds': 60}))
+            config.write_text(json.dumps({'slots': slots, 'state_dir': str(gate_dir), 'global_lock_timeout_seconds': 60, 'protect_stock_from_timeout': not hard}))
             plist = home / 'Library/LaunchAgents/com.trancedu.apple-pickup-router.plist'
             plist.parent.mkdir(parents=True)
             plist.write_bytes(plistlib.dumps({'ProgramArguments': [str(node), '--config', str(config)]}))
@@ -79,6 +81,9 @@ class AutomaticCleanupTests(unittest.TestCase):
                 if argv[:2] == ['launchctl', 'print']:
                     return subprocess.CompletedProcess(argv, 0, 'state = running' if running else 'state = not running', '')
                 if argv[0] == str(node):
+                    if hard:
+                        self.assertIsNone(json.loads(gate.read_text())['event_id'])
+                        self.assertIsNone(json.loads((root/'runtime-profiles/B/events.json').read_text())['active'])
                     restores.append(argv[-1])
                     body = [{'slot': 'B', 'restored': restore_ok, 'reason': 'fixture_failure' if not restore_ok else None}]
                     return subprocess.CompletedProcess(argv, 0, json.dumps(body), '')
@@ -109,6 +114,12 @@ class AutomaticCleanupTests(unittest.TestCase):
 
     def test_changed_owner_is_never_cleared_by_an_old_timer(self):
         self.exercise(replace_owner=True)
+
+    def test_hard_deadline_clears_before_browser_restore(self):
+        self.exercise(hard=True)
+
+    def test_hard_deadline_stays_unlocked_even_when_browser_restore_fails(self):
+        self.exercise(hard=True, restore_ok=False)
 
 
 if __name__ == '__main__':

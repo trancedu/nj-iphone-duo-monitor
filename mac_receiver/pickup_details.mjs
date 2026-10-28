@@ -91,8 +91,14 @@ export async function preparePickupDetails(browser,stage,now=new Date()) {
   const finalButton=page.locator('[id="co-options-applePay"]');
   await finalButton.waitFor({state:'visible'});
   if(await finalButton.count()!==1||!await finalButton.isEnabled()) throw new Stop('apple_pay_handoff_not_ready');
-  // Hard boundary: never click Continue with Apple Pay, authorize a wallet,
-  // accept the final terms, or submit an order.
   stage('pickup_details_at');stage('handoff_at');
+  if(browser.config.open_apple_pay_sheet===true){
+    if(!/^Continue with (?:Apple\s*|\uF8FF\s*)Pay$/i.test((await finalButton.innerText()).trim()))throw new Stop('apple_pay_button_label_changed');
+    await page.bringToFront();
+    stage('apple_pay_sheet_requested_at');
+    await finalButton.click({noWaitAfter:true}); // One click; no automatic retry after uncertainty.
+    stage('apple_pay_button_clicked_at');
+  }
+  // Device/biometric authorization remains manual; no terms or order-submit action.
   return 'awaiting_user';
 }

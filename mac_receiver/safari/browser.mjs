@@ -1,10 +1,10 @@
 // Production adapter. Engine owns deduplication, held queues and durable locks.
-import {SafariWindow,listSafariWindows,prepareSafari,waitFor} from './shopping.mjs';
+import {SafariWindow,listSafariWindows,prepareSafari,prepareSafariStandby,waitFor} from './shopping.mjs';
 import {signalSafari} from './feedback.mjs';
 import {Stop,expectedProduct} from '../protocol.mjs';
 export class SafariPickupBrowser {
-  constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,signal=signalSafari}={}) {
-    this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=prepare;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
+  constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,standby=prepareSafariStandby,signal=signalSafari}={}) {
+    this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=prepare;this.standby=standby;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
   }
   ready(){return this.connected&&!!this.page&&!this.page.closed;}
   async start(){await this.ensurePage();}
@@ -21,7 +21,7 @@ export class SafariPickupBrowser {
   }
   onEventStarted(item){
     this.eventAlert={id:item.event_id,queued:false};
-    return this.signal(null,{status:'inventory_signal'},{event_id:item.event_id,state_dir:this.config.state_dir,mode:'production',profile:this.config.safari_profile,product:expectedProduct(item.product_url)}).then(receipt=>{
+    return this.signal(null,{status:'inventory_signal'},{event_id:item.event_id,state_dir:this.config.state_dir,speech_enabled:this.config.speech_enabled,mode:'production',profile:this.config.safari_profile,product:expectedProduct(item.product_url)}).then(receipt=>{
       if(this.eventAlert?.id===item.event_id)this.eventAlert.queued=receipt.audio_queued===true||receipt.sound_played===true;
       return receipt;
     });
@@ -30,7 +30,7 @@ export class SafariPickupBrowser {
     if(this.idleRefreshPromise)await this.idleRefreshPromise.catch(()=>{});
     await this.ensurePage();
     const cfg={...this.config,handoff_event_id:event.event_id,test_any_available_store:false,pickup_details:{...this.config.pickup_details}};
-    cfg.pickup_zip=process.env.APPLE_PICKUP_ZIP??event.pickup_zip??this.config.pickup_zip;
+    cfg.pickup_zip=process.env.APPLE_PICKUP_ZIP??(this.config.standby_page==='pickup_checkout'?this.config.pickup_zip:event.pickup_zip)??this.config.pickup_zip;
     if(event.store_name)cfg.pickup_details.store_name=/^Apple\s/.test(event.store_name)?event.store_name:'Apple '+event.store_name;
     const context={backend:'safari',profile:this.config.safari_profile,window_id:this.window.id,requested_store_name:cfg.pickup_details.store_name,requested_store_id:event.store_id};
     const observe=(name,detail)=>stage(name,detail?{...detail,...context}:undefined);
@@ -48,13 +48,15 @@ export class SafariPickupBrowser {
   }
   async seedIdle(){
     await this.ensurePage();
-    const result=await this.workflow(this.window,this.config.preseeded_product_url,this.config,{seedOnly:true});
+    const result=this.config.standby_page==='pickup_checkout'
+      ?await this.standby(this.window,this.config.preseeded_product_url,this.config)
+      :await this.workflow(this.window,this.config.preseeded_product_url,this.config,{seedOnly:true});
     this.lastIdleRefreshAt=Date.now();
     return result;
   }
   async handoff(status,reason){
     if(status==='awaiting_user'&&this.config.handoff_idle_timeout_seconds>0)try{await this.window.call('armIdle',{event_id:this.activeTaskId});}catch{}
-    return this.signal(this.window,{status,reason},{mute_audio:status==='awaiting_user'&&this.eventAlert?.id===this.activeTaskId&&this.eventAlert.queued,event_id:this.activeTaskId,state_dir:this.config.state_dir,mode:this.config.dry_run?'test':'production',profile:this.config.safari_profile,product:expectedProduct(this.activeProductURL||this.config.preseeded_product_url)});
+    return this.signal(this.window,{status,reason},{mute_audio:status==='awaiting_user'&&this.eventAlert?.id===this.activeTaskId&&this.eventAlert.queued,event_id:this.activeTaskId,state_dir:this.config.state_dir,speech_enabled:this.config.speech_enabled,mode:this.config.dry_run?'test':'production',profile:this.config.safari_profile,product:expectedProduct(this.activeProductURL||this.config.preseeded_product_url)});
   }
   async inspectIdle(item){
     if(!this.ready())return {status:'browser_not_ready'};
@@ -68,15 +70,59 @@ export class SafariPickupBrowser {
     return result;
   }
   async notifyIdleReturn(item){
-    return this.signal(null,{status:'idle_timeout_returned'},{event_id:item.event_id,state_dir:this.config.state_dir,mode:'production',profile:this.config.safari_profile,product:expectedProduct(item.product_url)});
+    return this.signal(null,{status:'idle_timeout_returned'},{event_id:item.event_id,state_dir:this.config.state_dir,speech_enabled:this.config.speech_enabled,mode:'production',profile:this.config.safari_profile,product:expectedProduct(item.product_url)});
   }
 
   refreshIdleBag(now=Date.now()){
+    if(this.config.standby_page==='pickup_checkout')return Promise.resolve({status:'skipped'});
     if(this.idleRefreshPromise)return this.idleRefreshPromise;
     const seconds=this.config.idle_bag_refresh_interval_seconds??300;
     if(!seconds||!this.ready()||this.requestReservations||now-this.lastIdleRefreshAt<seconds*1000)return Promise.resolve({status:'skipped'});
     this.lastIdleRefreshAt=now;
     const task=this._refreshIdleBag();this.idleRefreshPromise=task;
+    task.finally(()=>{if(this.idleRefreshPromise===task)this.idleRefreshPromise=null;}).catch(()=>{});
+    return task;
+  }
+  refreshStandby(now=Date.now(),{expiredOnly=false,recovering=false,onExpired}={}){
+    const seconds=this.config.idle_checkout_refresh_interval_seconds||0;
+    const checkSeconds=this.config.checkout_session_check_interval_seconds||60;
+    const refreshDue=!expiredOnly&&seconds>0&&now-this.lastIdleRefreshAt>=seconds*1000;
+    const checkDue=now-(this.lastStandbyCheckAt??this.lastIdleRefreshAt)>=checkSeconds*1000;
+    if(this.config.standby_page!=='pickup_checkout'||!this.ready()||this.requestReservations||this.idleRefreshPromise||(!refreshDue&&!checkDue))return null;
+    this.lastStandbyCheckAt=now;
+    if(refreshDue)this.lastIdleRefreshAt=now;
+    const task=(async()=>{
+      try{
+        // A selected store, details page or payment sheet is never maintained.
+        const state=await this.window.call('standbyState',{product:expectedProduct(this.config.preseeded_product_url)});
+        this.lastSessionCheck={at:new Date(now).toISOString(),status:state.expired?'expired':state.protected?'protected':state.ready?'ready':'unknown'};
+        if(state.session_warning){
+          await this.window.call('continueShoppingSession');
+          await waitFor(async()=>!(await this.window.call('standbyState',{product:expectedProduct(this.config.preseeded_product_url)})).session_warning,this.config.step_timeout_ms||20000,500);
+          this.lastSessionCheck.status='session_continued';this.lastIdleRefreshAt=now;
+          console.info(JSON.stringify({event:'checkout_session_continued',profile:this.config.safari_profile,at:new Date().toISOString()}));
+          return {status:'session_continued'};
+        }
+        if(state.protected)return {status:'protected'};
+        if(state.ready&&!state.expired)this.sessionRecoveryPending=false;
+        const recovery=state.expired||this.sessionRecoveryPending||recovering;
+        // Passive checks never refresh healthy pages. A definite expiry is
+        // rebuilt through Bag without first reloading the expired URL.
+        if(!recovery&&!refreshDue)return {status:'checked'};
+        if(now<(this.nextSessionRecoveryAt||0))return {status:'backoff'};
+        // Persist a terminal expiry before navigating a protected task away.
+        // A regular unavailable page is never enough to retire a task.
+        if(onExpired&&state.expired)await onExpired();
+        if(recovery)this.sessionRecoveryPending=true;
+        this.nextSessionRecoveryAt=now+180000;
+        const result=await this.standby(this.window,this.config.preseeded_product_url,this.config,{refresh:!recovery});
+        this.lastIdleRefreshAt=now;this.nextSessionRecoveryAt=0;this.sessionRecoveryPending=false;
+        this.lastSessionCheck.status=recovery?'recovered':'ready';
+        console.info(JSON.stringify({event:recovery?'checkout_session_recovery':'idle_checkout_refresh',profile:this.config.safari_profile,status:'refreshed',at:new Date().toISOString()}));
+        return result;
+      }catch(error){this.lastSessionCheck={at:new Date(now).toISOString(),status:'failed',reason:error.code||'browser_error'};console.info(JSON.stringify({event:'idle_checkout_refresh',profile:this.config.safari_profile,status:'failed',reason:error.code||'browser_error',at:new Date().toISOString()}));return {status:'failed'};}
+    })();
+    this.idleRefreshPromise=task;
     task.finally(()=>{if(this.idleRefreshPromise===task)this.idleRefreshPromise=null;}).catch(()=>{});
     return task;
   }

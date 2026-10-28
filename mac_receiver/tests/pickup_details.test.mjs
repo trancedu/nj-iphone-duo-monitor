@@ -20,26 +20,27 @@ test('future day is recognized, no past slot or unknown date is accepted',()=>{
   assert.throws(()=>chooseTimeWindow(options,'unknown',contact,now),e=>e.code==='pickup_date_unrecognized');
   assert.throws(()=>chooseTimeWindow(options,'october26',contact,new Date('2026-10-27T03:00:00Z')),e=>e.code==='pickup_time_unavailable');
 });
-test('details extension selects slot and fills contact, never clicks final Apple Pay',async t=>{
+for(const openSheet of [false,true])test(`details extension verifies contact; wallet request enabled=${openSheet}`,async t=>{
   const chrome=await chromium.launch({channel:'chrome',headless:true});t.after(()=>chrome.close());
   const page=await chrome.newPage();page.setDefaultTimeout(1000);let forbidden=0;
   await page.route('**/*',async route=>{
     const path=new URL(route.request().url()).pathname;
     let html;
     if(path==='/checkout') html=`<fieldset data-list><legend>Select your pickup store:</legend><label><input type="radio" name="store">Apple West 14th Street Available Today</label><label><input type="radio" name="date" checked>october26</label><select id="checkout.fulfillment.pickupTab.pickup.timeSlot.dateTimeSlots.timeSlotValue">${options.map(o=>`<option value="${o.value}">${o.label}</option>`).join('')}</select></fieldset><button onclick="location.href='/details'">Continue to Pickup Details</button>`;
-    else if(path==='/details') html=`<h1>Now fill out your pickup information.</h1><label><input type="radio" checked>I’ll pick it up</label>${['First Name','Last Name','Email Address','Phone Number'].map(label=>`<label>${label}<input></label>`).join('')}<button id="co-options-applePay" onclick="location.href='/forbidden'">Continue with Apple Pay</button>`;
+    else if(path==='/details') html=`<h1>Now fill out your pickup information.</h1><label><input type="radio" checked>I’ll pick it up</label>${['First Name','Last Name','Email Address','Phone Number'].map(label=>`<label>${label}<input></label>`).join('')}<button id="co-options-applePay" onclick="${openSheet?'window.walletRequests=(window.walletRequests||0)+1':"location.href='/forbidden'"}">Continue with Apple Pay</button>`;
     else {forbidden++;html='<h1>Unexpected payment action</h1>';}
     await route.fulfill({contentType:'text/html; charset=utf-8',body:html});
   });
   await page.goto('https://www.apple.com/checkout');
-  const browser=new PickupBrowser({selectors:{store_list:'[data-list]'},pickup_details:{...contact,store_name:'Apple Other Preferred Store'}});browser.page=page;browser.connected=true;browser.requestedStore='West 14th Street';
+  const browser=new PickupBrowser({selectors:{store_list:'[data-list]'},pickup_details:{...contact,store_name:'Apple Other Preferred Store'},open_apple_pay_sheet:openSheet});browser.page=page;browser.connected=true;browser.requestedStore='West 14th Street';
   const stages=[];
   assert.equal(await preparePickupDetails(browser,s=>stages.push(s),now),'awaiting_user');
   assert.equal(await page.getByRole('textbox',{name:'First Name',exact:true}).inputValue(),'Test');
   assert.equal(await page.getByRole('textbox',{name:'Email Address',exact:true}).inputValue(),'test@example.com');
   assert.equal(await page.locator('#co-options-applePay').isVisible(),true);
   assert.equal(forbidden,0);
-  assert.deepEqual(stages,['pickup_time_at','details_navigation_at','details_page_ready_at','contact_fill_started_at','pickup_details_at','handoff_at']);
+  assert.deepEqual(stages,['pickup_time_at','details_navigation_at','details_page_ready_at','contact_fill_started_at','pickup_details_at','handoff_at',...(openSheet?['apple_pay_sheet_requested_at','apple_pay_button_clicked_at']:[])]);
+  assert.equal(await page.evaluate(()=>window.walletRequests),openSheet?1:undefined);
 });
 test('unavailable configured store stops without selecting another store',async t=>{
   const chrome=await chromium.launch({channel:'chrome',headless:true});t.after(()=>chrome.close());

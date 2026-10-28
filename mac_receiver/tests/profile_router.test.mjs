@@ -52,6 +52,16 @@ for(const status of ['running','manual_review','awaiting_user'])test(`available 
   assert.equal(await h.router.watchGlobalTimeout(Date.parse(h.router.globalLock.claimed_at)+900000),false);
   assert.equal(count,0);assert.equal(h.router.health().stock_page_protected,true);
 });
+for(const status of ['running','manual_review','awaiting_user'])test(`hard deadline expires ${status} at sixty seconds even after stock found`,async t=>{
+  const h=harness(t,true);Object.assign(h.config,{global_lock_timeout_seconds:60,protect_stock_from_timeout:false});
+  h.router.accept(event('available',DUO_VARIANTS[0]));await nextTurn();await nextTurn();
+  const item=h.slots[0].engine.state.events.available;item.status=status;item.timestamps.pickup_stock_found_at=new Date().toISOString();
+  let count=0;h.router.onGlobalTimeout=async()=>count++;
+  const at=Date.parse(h.router.globalLock.claimed_at);
+  assert.equal(await h.router.watchGlobalTimeout(at+59999),false);
+  assert.equal(await h.router.watchGlobalTimeout(at+60000),true);
+  assert.equal(count,1);assert.equal(h.router.health().stock_page_protected,false);
+});
 for(const fails of [false,true])test(`unavailable releases global only after successful bag restore (restore fails=${fails})`,async t=>{
   const h=harness(t,true);h.config.release_global_on_unavailable=true;
   const slot=h.slots[0];slot.engine.config.auto_release_unavailable=true;

@@ -38,3 +38,13 @@ test('speech failure is reported and ordinary tone playback still succeeds',asyn
 test('preview identifies itself and does not claim live inventory',()=>{
  const p=feedbackPlan({status:'awaiting_user'},{preview:true});assert.ok(p.title.includes('试听'));assert.ok(p.message.includes('试听'));assert.ok(!p.message.includes('已准备好'));assert.equal(p.repetitions,0);
 });
+test('receiver speech can be disabled without queueing a voice or fallback bell',async()=>{
+ for(const status of ['inventory_signal','awaiting_user']){
+  const context={speech_enabled:false,product:'iPhone Duo 512GB Night Sky'};
+  const plan=feedbackPlan({status},context);assert.equal(plan.speech,null);
+  let notified=0;const calls=[];
+  await playAttentionSound(plan,{execute:async file=>calls.push(file)});assert.equal(calls.length,0);
+  const r=await signalSafari(null,{status},context,{audioQueue:{submit:()=>{throw Error('must not queue audio');}},bell:()=>{throw Error('must not beep');},notify:async()=>notified++});
+  assert.equal(r.audio_skipped,'speech_disabled');assert.equal(notified,1);
+ }
+});

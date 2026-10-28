@@ -11,7 +11,7 @@ const product='iPhone 18 Pro 256GB Burgundy';
 // Keep the fixture's 10 a.m. slots in the future regardless of test-run time.
 const pickupDate=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',month:'long',day:'numeric'}).format(new Date(Date.now()+86400000)).replace(/\s/g,'').toLowerCase();
 const config={pickup_zip:'07094',pickup_unavailable_retries:1,pickup_retry_interval_ms:1000,pickup_details:{store_name:'Apple Test Store',first_name:'Test',last_name:'User',email:'test@example.com',phone:'2025550123',preferred_slot:2,min_lead_minutes:0}};
-async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarget=false,wrongLocation=false}={}) {
+async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarget=false,wrongLocation=false,walletSheet=false}={}) {
  const chrome=await chromium.launch({channel:'chrome',headless:true});t.after(()=>chrome.close());
  const page=await chrome.newPage();let bag=existing,adds=0,checks=0,forbidden=0;
  await page.route('**/*',async route=>{
@@ -23,6 +23,7 @@ async function fixture(t,{existing=false,availableAfter=1,wrong=false,hiddenTarg
    checks++;body=`<button>07094</button><label><input type="radio">I’ll pick it up</label><fieldset><legend>Select your pickup store:</legend>${hiddenTarget?Array.from({length:5},(_,i)=>`<label><input type="radio" disabled>Apple Other ${i} unavailable</label>`).join('')+'<div id="extra-stores" hidden>':''}<label><input id="store-target" type="radio" name="store" ${checks<availableAfter?'disabled':''}>Apple Test Store Available Today</label>${hiddenTarget?'</div><a href="#" onclick="event.preventDefault();document.getElementById(\'extra-stores\').hidden=false;this.remove()">Show more stores</a>':''}<label><input type="radio" name="date" checked>${pickupDate}</label><select id="checkout.fulfillment.pickupTab.pickup.timeSlot.dateTimeSlots.timeSlotValue"><option value="1">10:00 a.m. – 10:15 a.m.</option><option value="2">10:15 a.m. – 10:30 a.m.</option></select></fieldset><button onclick="location.href='/details'">Continue to Pickup Details</button>`;
   } else if(path==='/details')body=`<h1>Now fill out your pickup information.</h1><label><input type="radio" checked>I’ll pick it up</label>${['First Name','Last Name','Email Address','Phone Number'].map(label=>`<label>${label}<input></label>`).join('')}<button id="co-options-applePay" onclick="location.href='/payment'">Continue with Apple Pay</button>`;
   else{forbidden++;body='<h1>Forbidden</h1>';}
+  if(path==='/details'&&walletSheet)body=body.replace("onclick=\"location.href='/payment'\"","onclick=\"window.walletRequests=(window.walletRequests||0)+1;document.getElementById('wallet-sheet').hidden=false\"")+'<div id="wallet-sheet" hidden>Confirm with Touch ID<button onclick="window.authorized=true">Authorize payment</button></div>';
   if(path==='/checkout'&&wrongLocation)body=body.replace('<button>07094</button>',`<button onclick="document.getElementById('zip-editor').hidden=false;this.hidden=true">East Rutherford, NJ</button><div id="zip-editor" hidden><label>Zip Code or City, State<input role="combobox" value="East Rutherford, NJ"></label><button onclick="window.zipApplied=(window.zipApplied||0)+1;document.getElementById('store-target').disabled=false">Apply</button></div>`);
   await route.fulfill({contentType:'text/html; charset=utf-8',body});
  });
@@ -52,7 +53,7 @@ test('Safari unexpected bag configuration never clicks checkout or removes anyth
  await assert.rejects(()=>prepareSafari(f.window,url,config),e=>e.code==='bag_not_exactly_one_target');
  assert.deepEqual(f.counts(),{adds:0,checks:0,forbidden:0});
 });
-test('Safari dispatcher has no final payment operation',async t=>{
+test('Safari dispatcher has no wallet authorization operation',async t=>{
  const f=await fixture(t);await assert.rejects(()=>f.window.call('pay'),/unsupported_safari_operation/);
  assert.deepEqual(f.counts(),{adds:0,checks:0,forbidden:0});
 });
@@ -175,4 +176,26 @@ test('wrong city location is corrected once before unavailable verdict, then pre
  const f=await fixture(t,{existing:true,availableAfter:99,wrongLocation:true});let reloads=0;f.window.reload=()=>{reloads++;};const stages=[];
  const result=await prepareSafari(f.window,url,config,{stage:s=>stages.push(s)});
  assert.equal(result.status,'awaiting_user');assert.equal(stages.filter(s=>s==='pickup_location_corrected_at').length,1);assert.ok(stages.includes('pickup_stock_found_at'));assert.equal(reloads,0);assert.equal(f.counts().forbidden,0);
+});
+
+test('opt-in requests Apple Pay exactly once after verified contact; never authenticates',async t=>{
+ const f=await fixture(t,{existing:true,walletSheet:true});const stages=[];
+ const result=await prepareSafari(f.window,url,{...config,open_apple_pay_sheet:true},{stage:s=>stages.push(s)});
+ assert.equal(result.status,'awaiting_user');assert.equal(result.finalApplePayClicked,true);assert.equal(result.applePayAuthenticated,false);
+ assert.equal(await f.page.evaluate(()=>window.walletRequests),1);assert.equal(await f.page.evaluate(()=>window.authorized),undefined);
+ assert.ok(stages.indexOf('contact_verified_at')<stages.indexOf('apple_pay_sheet_requested_at'));
+ await assert.rejects(()=>f.window.call('requestApplePay',{contact:config.pickup_details}),/apple_pay_already_requested/);
+ assert.equal(await f.page.evaluate(()=>window.walletRequests),1);assert.equal(f.counts().forbidden,0);
+});
+test('Apple Pay request refuses changed contact and never clicks',async t=>{
+ const f=await fixture(t,{existing:true,walletSheet:true});await prepareSafari(f.window,url,config);
+ await f.page.getByRole('textbox',{name:'Email Address',exact:true}).fill('changed@example.com');
+ await assert.rejects(()=>f.window.call('requestApplePay',{contact:config.pickup_details}),/contact_not_verified/);
+ assert.equal(await f.page.evaluate(()=>window.walletRequests),undefined);assert.equal(f.counts().forbidden,0);
+});
+test('uncertain Apple Pay invocation is not retried and the found-stock stage remains',async t=>{
+ const f=await fixture(t,{existing:true,walletSheet:true});const call=f.window.call;let requests=0;const stages=[];
+ f.window.call=async(op,args)=>{if(op==='requestApplePay'){requests++;await call(op,args);throw Error('reply_lost_after_click');}return call(op,args);};
+ await assert.rejects(()=>prepareSafari(f.window,url,{...config,open_apple_pay_sheet:true},{stage:s=>stages.push(s)}),/reply_lost_after_click/);
+ assert.equal(requests,1);assert.ok(stages.includes('pickup_stock_found_at'));assert.ok(stages.includes('apple_pay_sheet_requested_at'));assert.equal(await f.page.evaluate(()=>window.walletRequests),1);assert.equal(await f.page.evaluate(()=>window.authorized),undefined);
 });

@@ -34,7 +34,7 @@ export class ProfileRouter {
   async watchGlobalTimeout(nowMs=Date.now()){
     this.expireWaiting(nowMs);
     if(!this.globalLock?.event_id){this.dispatchWaiting(nowMs);return false;}
-    if(this.stockProtected())return false;
+    if(this.config.protect_stock_from_timeout!==false&&this.stockProtected())return false;
     const seconds=this.config.global_lock_timeout_seconds||0;
     if(!seconds||!this.globalLock?.event_id||!this.onGlobalTimeout||this.timeoutInFlight||nowMs<(this.timeoutRetryAt||0))return false;
     const claimed=Date.parse(this.globalLock.claimed_at);
@@ -81,7 +81,7 @@ export class ProfileRouter {
   }
   dispatchWaiting(nowMs=Date.now()){
     if(this.dropBusyEvents()){this.expireWaiting(nowMs);return false;}
-    if(this.globalLock?.event_id||nowMs<(this.dispatchNotBefore||0)||this.slots.some(s=>s.engine.state.active||s.engine.releasing||s.engine.signaling))return false;
+    if(this.standbyMaintenancePromise||this.globalLock?.event_id||nowMs<(this.dispatchNotBefore||0)||this.slots.some(s=>s.engine.state.active||s.engine.releasing||s.engine.signaling))return false;
     this.expireWaiting(nowMs);
     const next=this.waiting().sort((a,b)=>b.item.timestamps.received_at.localeCompare(a.item.timestamps.received_at))[0];
     if(!next||!next.slot.browser.ready())return false;
@@ -100,6 +100,9 @@ export class ProfileRouter {
     if(this.slotForEvent(event.event_id)||this.blockedGlobally(event))return;
     // Reserve before any asynchronous window check: the first arrival wins.
     this.claimGlobal(event.event_id);
+    // Reserve the global gate first, then let at most one in-flight idle
+    // refresh finish. No second profile starts maintenance after this claim.
+    if(this.standbyMaintenancePromise)await this.standbyMaintenancePromise.catch(()=>{});
     if(this.config.browser_backend==='safari'){
       slot.browser.requestReservations=(slot.browser.requestReservations||0)+1;
       slot.browser.requestReservationsByEvent||=new Map();
@@ -150,10 +153,41 @@ export class ProfileRouter {
     try{await slot.browser.seedIdle();return engine.reset(id,true);}finally{engine.releasing=false;}
   }
   expireHeld(){for(const s of this.slots)s.engine.expireHeld();this.expireWaiting();}
+  async maintainStandby(nowMs=Date.now()){
+    if(this.standbyMaintenancePromise||this.slots.some(s=>s.engine.releasing||s.engine.signaling||s.browser.requestReservations||['queued','running'].includes(s.engine.state.events[s.engine.state.active]?.status)))return false;
+    for(const slot of this.slots){
+      const engine=slot.engine,item=engine.state.events[engine.state.active];
+      // A reserved event not yet in Engine is about to execute. Yield all I/O.
+      if(this.globalLock?.event_id&&!this.slotForEvent(this.globalLock.event_id))return false;
+      const onExpired=item?async()=>{
+        if(engine.state.active!==item.event_id)throw new Stop('expiry_owner_changed');
+        item.status='session_expired_recovering';item.reason='checkout_session_expired';
+        if(!item.timestamps.checkout_session_expired_at)engine.stage(item,'checkout_session_expired_at');
+        engine.save();
+      }:undefined;
+      const task=slot.browser.refreshStandby?.(nowMs,{expiredOnly:!!this.globalLock?.event_id||!!item,recovering:item?.status==='session_expired_recovering'&&!!item.timestamps.checkout_session_expired_at,onExpired});
+      if(!task)continue;
+      const managed=(async()=>{
+        const result=await task;
+        if(item&&engine.state.active===item.event_id&&item.status==='session_expired_recovering'&&item.timestamps.checkout_session_expired_at&&result?.status==='standby_checkout'){
+          item.status='session_expired_returned';item.release_reason='checkout_session_expired_return_to_standby';
+          engine.stage(item,'session_recovered_at');engine.reset(item.event_id,true);
+          if(this.globalLock?.event_id===item.event_id){
+            this.globalLock={event_id:null,released_at:new Date().toISOString(),reason:item.release_reason};this.saveGlobal();this.dispatchNotBefore=Date.now()+500;
+          }
+        }
+        return result;
+      })();
+      this.standbyMaintenancePromise=managed;
+      try{await managed;}finally{this.standbyMaintenancePromise=null;}
+      return true;
+    }
+    return false;
+  }
   health(){
     const profiles=this.slots.map(s=>({profile_label:s.label,product_url:s.product_url,aliases:s.aliases||[],...s.engine.health()}));
     this.expireWaiting();
-    return {status:'ok',busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.stockProtected(),recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
+    return {status:'ok',busy_event_policy:this.dropBusyEvents()?'drop':'recent_candidates',recent_waiting:this.waiting().length,stock_page_protected:this.config.protect_stock_from_timeout!==false&&this.stockProtected(),protect_stock_from_timeout:this.config.protect_stock_from_timeout!==false,recent_request_ttl_seconds:this.dropBusyEvents()?0:this.config.recent_request_ttl_seconds||0,...(this.globalFile?{execution_policy:this.config.global_lock_timeout_seconds?'first_arrival_with_timeout':'first_arrival_until_manual_unlock',global_lock_timeout_seconds:this.config.global_lock_timeout_seconds||0,global_locked:!!this.globalLock.event_id,global_event_id:this.globalLock.event_id,...(this.globalLock.event_id?{global_lock_claimed_at:this.globalLock.claimed_at}:{} )}:{}),...(this.config.browser_backend==='safari'?{audio_queue:audioQueueState()}:{}),browser_backend:this.config.browser_backend||'chrome',mode:this.config.dry_run?'dry_run':'live',router:'canonical_url_to_independent_profile',browser_ready:profiles.every(s=>s.browser_ready),ready:profiles.some(s=>s.ready),active_event_id:this.state.active,active_event_ids:profiles.map(s=>s.active_event_id).filter(Boolean),profiles};
   }
 }
 
@@ -171,7 +205,12 @@ export async function main() {
   if(cfg.idle_bag_refresh_interval_seconds===undefined)cfg.idle_bag_refresh_interval_seconds=300;
   if(!Number.isInteger(cfg.idle_bag_refresh_interval_seconds)||cfg.idle_bag_refresh_interval_seconds<0||cfg.idle_bag_refresh_interval_seconds>86400)throw new Stop('invalid_idle_bag_refresh_interval');
   if(!['chrome','safari'].includes(cfg.browser_backend||'chrome'))throw new Stop('invalid_browser_backend');
+  if(cfg.standby_page!==undefined&&cfg.standby_page!=='pickup_checkout')throw new Stop('invalid_standby_page');
+  if(cfg.standby_page==='pickup_checkout'&&cfg.browser_backend!=='safari')throw new Stop('checkout_standby_requires_safari');
+  if(cfg.idle_checkout_refresh_interval_seconds!==undefined&&(!Number.isInteger(cfg.idle_checkout_refresh_interval_seconds)||cfg.idle_checkout_refresh_interval_seconds<60||cfg.idle_checkout_refresh_interval_seconds>86400))throw new Stop('invalid_checkout_refresh_interval');
+  if(cfg.checkout_session_check_interval_seconds!==undefined&&(!Number.isInteger(cfg.checkout_session_check_interval_seconds)||cfg.checkout_session_check_interval_seconds<30||cfg.checkout_session_check_interval_seconds>3600))throw new Stop('invalid_session_check_interval');
   if(cfg.single_active_request!==undefined&&typeof cfg.single_active_request!=='boolean')throw new Stop('invalid_execution_policy');
+  if(cfg.protect_stock_from_timeout!==undefined&&typeof cfg.protect_stock_from_timeout!=='boolean')throw new Stop('invalid_stock_timeout_policy');
   if(cfg.release_global_on_unavailable!==undefined&&typeof cfg.release_global_on_unavailable!=='boolean')throw new Stop('invalid_unavailable_release_policy');
   if(cfg.drop_busy_events!==undefined&&typeof cfg.drop_busy_events!=='boolean')throw new Stop('invalid_busy_event_policy');
   if(cfg.recent_request_ttl_seconds!==undefined&&(!Number.isInteger(cfg.recent_request_ttl_seconds)||cfg.recent_request_ttl_seconds<0||cfg.recent_request_ttl_seconds>10))throw new Stop('invalid_recent_request_ttl');
@@ -196,6 +235,15 @@ export async function main() {
       const browser=cfg.browser_backend==='safari'?new SafariPickupBrowser(c):new PickupBrowser(c);await browser.start();const engine=new Engine(c,browser);slots.push({...s,browser,engine});
     }
     const router=new ProfileRouter(cfg,slots);
+    // Inspect restored locks promptly after a restart; this is a read-only
+    // first check unless the page explicitly proves its session has expired.
+    if(cfg.standby_page==='pickup_checkout'&&router.globalLock?.event_id)for(const slot of slots)slot.browser.lastStandbyCheckAt=Date.now()-60000;
+    if(cfg.standby_page==='pickup_checkout'&&!router.globalLock?.event_id&&!slots.some(s=>s.engine.state.active)){
+      for(const [index,slot] of slots.entries()){
+        try{const prepared=await slot.browser.seedIdle();slot.browser.lastIdleRefreshAt=Date.now()+index*10000;console.info(JSON.stringify({event:'standby_checkout_startup',profile:slot.label,status:prepared.status,zip:prepared.zip}));}
+        catch(error){console.info(JSON.stringify({event:'standby_checkout_startup',profile:slot.label,status:'failed',reason:error.code||'browser_error'}));}
+      }
+    }
     if(cfg.global_lock_timeout_seconds){
       router.onGlobalTimeout=async id=>{
         const {spawn}=await import('node:child_process');
@@ -211,7 +259,7 @@ export async function main() {
       };
       timeoutTimer=setInterval(()=>router.watchGlobalTimeout().catch(()=>{}),1000);timeoutTimer.unref();
     }
-    if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());for(const slot of slots){if(!slot.engine.state.active&&!slot.engine.releasing&&!slot.engine.signaling)slot.browser.refreshIdleBag?.().catch(()=>{});await slot.engine.watchIdle();}}catch{}finally{polling=false;}},2000);pollTimer.unref();}
+    if(cfg.browser_backend==='safari'){let polling=false;pollTimer=setInterval(async()=>{if(polling)return;polling=true;try{await pollSafariSlots(slots,await listSafariWindows());await router.maintainStandby();for(const slot of slots){if(!slot.engine.state.active&&!slot.engine.releasing&&!slot.engine.signaling)slot.browser.refreshIdleBag?.().catch(()=>{});await slot.engine.watchIdle();}}catch{}finally{polling=false;}},2000);pollTimer.unref();}
     ({server}=createReceiver(cfg,{ready:()=>true},secret,router));
     await new Promise((ok,bad)=>{server.once('error',bad);server.listen(cfg.port,cfg.host,ok);});
     if(!cfg.host.startsWith('127.')){local=http.createServer(server.listeners('request')[0]);local.requestTimeout=5000;local.headersTimeout=5000;local.timeout=5000;await new Promise((ok,bad)=>{local.once('error',bad);local.listen(cfg.port,'127.0.0.1',ok);});}

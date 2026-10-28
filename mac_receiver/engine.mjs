@@ -34,6 +34,8 @@ export class Engine {
     return {status:'ok',mode:this.config.dry_run?'dry_run':'live',
       browser_ready:this.browser.ready(),active_event_id:this.state.active,...(this.config.handoff_idle_timeout_seconds?{handoff_idle_timeout_seconds:this.config.handoff_idle_timeout_seconds}:{}),
       ...(this.config.idle_bag_refresh_interval_seconds?{idle_bag_refresh_interval_seconds:this.config.idle_bag_refresh_interval_seconds}:{}),
+      ...(this.config.standby_page?{standby_page:this.config.standby_page,idle_checkout_refresh_interval_seconds:this.config.idle_checkout_refresh_interval_seconds,checkout_session_check_interval_seconds:this.config.checkout_session_check_interval_seconds||60,pickup_zip:this.config.pickup_zip}:{}),
+      ...(this.browser.lastSessionCheck?{checkout_session_watch:this.browser.lastSessionCheck}:{}),
       ready:this.config.dry_run||this.browser.ready(),pending_events:Object.values(this.state.events).filter(x=>x.status==='held').length,apple_pay_verified:'manual_verification_required'};
   }
   accept(event) {

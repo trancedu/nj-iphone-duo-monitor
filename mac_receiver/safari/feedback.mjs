@@ -5,7 +5,7 @@ import {AudioQueue} from './audio_queue.mjs';
 import {appendDiagnostic} from './diagnostics.mjs';
 const run=promisify(execFile);
 const quote=s=>'"'+String(s).replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('\n','\\n').replaceAll('\r','\\r')+'"';
-export function feedbackPlan(result,{profile='Safari',product='',mode='test',preview=false}={}) {
+export function feedbackPlan(result,{profile='Safari',product='',mode='test',preview=false,speech_enabled=true}={}) {
   const details={inventory_signal:['Sosumi','收到库存信号，正在核验门店并准备自提。'],idle_timeout_returned:['Pop','等待接管超时，已返回购物袋待命。'],awaiting_user:['Sosumi','已准备好，请接管 Apple Pay。最终付款按钮未点击。'],pickup_unavailable:['Ping','自提重查结束，仍无货。未进入付款。'],seeded:['Ping','预备购物袋已就绪，尚未结账。']};
   const errors={target_store_not_listed:'目标门店未出现在列表中，库存尚未确认，请检查页面。',pickup_unavailable_after_selection_preserved:'已发现可自提库存，后续步骤异常；已保留页面，请手动继续。'};
   const [sound,message]=details[result.status]||['Sosumi',result.status==='stopped'?'请求未运行：'+(result.reason||'unknown'):errors[result.reason]||'脚本异常停止，请检查页面：'+(result.reason||'unknown')];
@@ -14,7 +14,7 @@ export function feedbackPlan(result,{profile='Safari',product='',mode='test',pre
   const variant=product.includes('Star White')?'白':product.includes('Night Sky')?'黑':'';
   const capacity=product.includes('512GB')?'五一二':product.includes('256GB')?'二五六':'';
   const spokenConfig=[capacity,variant].filter(Boolean).join('');
-  const speech=urgent&&spokenConfig?spokenConfig:null;
+  const speech=speech_enabled&&urgent&&spokenConfig?spokenConfig:null;
   return {status:result.status,sound:'/System/Library/Sounds/'+(preview?'Sosumi':sound)+'.aiff',repetitions,speech,title:preview?'Safari 提醒试听':(mode==='production'?'Safari 自提 — ':'Safari 测试 — ')+profile,message:preview?'快速纯语音试听。':[product,message].filter(Boolean).join('：')};
 }
 export async function playAttentionSound(plan,{execute=run,pause=ms=>new Promise(r=>setTimeout(r,ms))}={}) {
@@ -44,6 +44,11 @@ const notify=plan=>new Promise((ok,bad)=>{
 export async function signalSafari(window,result,context={},deps={}) {
   const plan=feedbackPlan(result,context),out={};
   if(window){try{await window.foreground();out.foreground=true;}catch{out.foreground=false;}}
+  if(context.speech_enabled===false&&plan.repetitions===0){
+    out.audio_skipped='speech_disabled';
+    try{await (deps.notify||notify)(plan);out.notification_submitted=true;}catch{out.notification_submitted=false;}
+    return out;
+  }
   const bell=deps.bell||(()=>process.stderr.write('\x07'));
   // Production never waits for audio. Notification and foreground are separate;
   // the queued tone/speech job cannot hold up a checkout or standby restoration.
