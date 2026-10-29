@@ -41,3 +41,14 @@ test('failed rebuild cannot claim success solely from its return status',async()
 test('desktop selection accepts all six or exactly one configured profile',()=>{
  assert.deepEqual(chooseLabels('all'),['A','B','C','D','E','F']);assert.deepEqual(chooseLabels('512 黑'),['D']);assert.deepEqual(chooseLabels('E'),['E']);assert.throws(()=>chooseLabels('unknown'),/invalid_restore_selection/);
 });
+test('desktop independently verifies the exact new window, pickup step and ZIP',async()=>{
+ const {verifyRestorePage}=await import('../restore_ready.mjs');let path='/shop/checkout',step='Fulfillment',zip='07094',warning=false;
+ const slot={safari_profile:'Duo256White',product_url:url};
+ class Window{constructor(id){this.id=id;}async call(op){return op==='locationState'?{displayed_zip:zip}:{pickup_selected:true,expired:false,session_warning:warning};}}
+ const deps={Window,list:async()=>[{id:789,name:'Duo256White — Checkout',tabs:1}],read:async()=>({path,step})};
+ assert.equal((await verifyRestorePage(slot,'07094',deps)).window_id,789);
+ step='Billing';await assert.rejects(()=>verifyRestorePage(slot,'07094',deps),/final_page_not_pickup/);
+ step='Fulfillment';zip='10001';await assert.rejects(()=>verifyRestorePage(slot,'07094',deps),/final_pickup_not_verified/);
+ zip='07094';warning=true;await assert.rejects(()=>verifyRestorePage(slot,'07094',deps),/final_pickup_not_verified/);
+ await assert.rejects(()=>verifyRestorePage(slot,'07094',{...deps,list:async()=>[{id:1,name:'Duo256White — Checkout',tabs:2}]}),/window_not_unique/);
+});

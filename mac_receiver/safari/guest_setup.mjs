@@ -2,9 +2,22 @@
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {homedir} from 'node:os';
-import {appleScript,waitFor,prepareSafari} from './shopping.mjs';
+import {appleScript,waitFor,prepareSafari,withPreparationTimeout} from './shopping.mjs';
 import {runGuestDOM,readGuestCard,cancelGuestSignIn,prepareGuestStandby} from './guest_checkout.mjs';
 import {expectedProduct} from '../protocol.mjs';
+import {safeErrorCode} from './diagnostics.mjs';
+
+export async function attemptPreparationSignInCancel(window,stage=()=>{},options={}){
+ const {cancel=cancelGuestSignIn,...settings}=options;
+ try{const result=await cancel(window,stage,{timeoutMs:20000,...settings});return {confirmed:true,status:result.status};}
+ catch(error){
+  const reason=safeErrorCode(error,'native_cancel_failed');
+  if(!['guest_target_window_not_visible','unknown_guest_sheet_requires_manual_review','guest_account_prompt_did_not_close','guest_account_cancel_unconfirmed','guest_account_prompt_reappeared','safari_apple_event_failed','safari_step_timeout','safari_accessibility_permission_required'].includes(reason))throw error;
+  stage('setup_native_signin_cancel_unconfirmed',{kind:'guest_native_prompt',error_code:reason});
+  return {confirmed:false,reason};
+ }
+}
+
 export function prewarmDOM({op,shipping={},card={}}){
  const visible=e=>!!e&&!!e.getClientRects().length;
  const norm=s=>(s||'').replace(/\s+/g,' ').trim();
@@ -77,7 +90,10 @@ export function validateSetupProfile(window,url){
  }
  return product;
 }
-export async function prepareGuestPaymentSession(window,url,config,{allowReplenish=false,stage=()=>{},shipping}={}){
+export function prepareGuestPaymentSession(window,url,config,options={}){
+ return withPreparationTimeout(()=>prepareGuestPaymentSessionImpl(window,url,{...config,step_timeout_ms:20000},options));
+}
+async function prepareGuestPaymentSessionImpl(window,url,config,{allowReplenish=false,stage=()=>{},shipping}={}){
  const product=validateSetupProfile(window,url);
  shipping??=JSON.parse(readFileSync(config.guest_shipping_file||resolve(homedir(),'.config/iphone-duo/guest-shipping.json'),'utf8'));
  for(const k of ['first_name','last_name','street','zip','city','state','email','phone'])if(typeof shipping[k]!=='string'||!shipping[k].trim())throw Error('guest_shipping_configuration_incomplete');
@@ -94,7 +110,7 @@ export async function prepareGuestPaymentSession(window,url,config,{allowRepleni
  await waitFor(async()=>(await runGuestDOM(window,'bagReady')).ready);
  await runGuestDOM(window,'bagCheckout',{expected_product:product});stage('setup_checkout_clicked_at');
  const entry=await waitFor(async()=>{const s=await runGuestDOM(window,'state');return s.guest||s.path==='/shop/checkout'?s:null;});
- if(entry.guest){await cancelGuestSignIn(window,stage);await runGuestDOM(window,'guestContinue');}
+ if(entry.guest){await attemptPreparationSignInCancel(window,stage);await runGuestDOM(window,'guestContinue');}
  await waitFor(async()=>['Fulfillment','Fulfillment-init'].includes((await runGuestDOM(window,'state')).step));
  await waitFor(async()=>(await setupDOM(window,'deliveryReady')).ready);
  await setupDOM(window,'chooseDelivery');
@@ -112,6 +128,6 @@ export async function prepareGuestPaymentSession(window,url,config,{allowRepleni
  await window.call('armPickupStandby',{product,explicit_test_reset:true});
  await prepareGuestStandby(window,url,{...config,guest_payment_prepared:true,urgent_same_configuration_retry:false},{stage});
  if((await window.call('locationState')).displayed_zip!==config.pickup_zip)throw Error('setup_pickup_zip_not_verified');
- await cancelGuestSignIn(window,stage,{allowPickup:true});
- stage('setup_guest_pickup_verified_at');return {status:'standby_checkout',payment_submitted:false};
+ const native=await attemptPreparationSignInCancel(window,stage,{allowPickup:true});
+ stage('setup_guest_pickup_verified_at');return {status:'standby_checkout',payment_submitted:false,native_prompt_verified:native.confirmed};
 }

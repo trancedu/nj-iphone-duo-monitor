@@ -267,3 +267,11 @@ test('restore-only desktop action does not interrupt a fresh inventory runner',a
  assert.throws(()=>f.router.manualRetry({profile_label:'A',expected_event_id:'live-stock',restore_only:true}),/task_still_running/);
  assert.equal(f.slots[0].browser.abortEventId,undefined);assert.equal(f.slots[0].engine.state.active,'live-stock');
 });
+test('manual restoration reserves a profile but waits for existing maintenance before navigating',async t=>{
+ const f=fixture(t);let finish,restored=0;
+ f.slots[0].browser.idleRefreshPromise=new Promise(r=>finish=r);
+ f.slots[0].browser.manualRetryToPickup=async()=>{restored++;};
+ const r=f.router.manualRetry({profile_label:'A',expected_event_id:null,restore_only:true});
+ await turn();assert.equal(restored,0);assert.equal(f.slots[0].reservedEvent,r.event_id);
+ finish();await turn();await turn();assert.equal(restored,1);assert.equal(f.slots[0].engine.state.events[r.event_id].status,'manual_retry_ready');
+});

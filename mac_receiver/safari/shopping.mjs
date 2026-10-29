@@ -14,7 +14,11 @@ import {classifyStores,sanitizeObservation} from './diagnostics.mjs';
 import {productURL,expectedProduct,Stop} from '../protocol.mjs';
 import {chooseTimeWindow,validatePickupDetails,pickupDetailsFromEnv} from '../pickup_details.mjs';
 const stepDeadline=new AsyncLocalStorage();
+const stepLimit=new AsyncLocalStorage();
 export const MAX_PICKUP_STEP_MS=10000;
+export const PREPARATION_STEP_MS=20000;
+// Preparation has its own per-step budget; concurrent inventory tasks retain 10s.
+export function withPreparationTimeout(fn){return stepLimit.run(PREPARATION_STEP_MS,fn);}
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const asString=s=>'"'+s.replaceAll('\\','\\\\').replaceAll('"','\\"').replaceAll('\n','\\n').replaceAll('\r','\\r')+'"';
 export async function appleScript(source) {
@@ -23,7 +27,7 @@ export async function appleScript(source) {
   return new Promise((ok,bad)=>{
     const child=spawn('/usr/bin/osascript',['-'],{stdio:['pipe','pipe','pipe']});let output='',error='';
     let timedOut=false;
-    const timer=setTimeout(()=>{timedOut=true;child.kill('SIGKILL');},Math.min(MAX_PICKUP_STEP_MS,remaining));
+    const timer=setTimeout(()=>{timedOut=true;child.kill('SIGKILL');},Math.min(stepLimit.getStore()??MAX_PICKUP_STEP_MS,remaining));
     child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>error+=b);
     child.on('error',()=>{clearTimeout(timer);bad(new Stop('safari_apple_events_unavailable'));});
     child.on('close',code=>{clearTimeout(timer);code===0?ok(output.trim()):bad(new Stop(timedOut?'safari_step_timeout':error.includes('(-25211)')?'safari_accessibility_permission_required':error.includes('Allow JavaScript')?'safari_javascript_permission_required':error.includes('profile_changed')?'safari_profile_changed':error.includes('single_test_tab_required')?'safari_single_test_tab_required':'safari_apple_event_failed'));});
@@ -62,8 +66,8 @@ export class SafariWindow {
   }
 
 }
-export async function waitFor(fn,timeout=MAX_PICKUP_STEP_MS,interval=100) {
-  const deadline=Math.min(Date.now()+Math.min(timeout,MAX_PICKUP_STEP_MS),stepDeadline.getStore()??Infinity);
+export async function waitFor(fn,timeout=stepLimit.getStore()??MAX_PICKUP_STEP_MS,interval=100) {
+  const deadline=Math.min(Date.now()+Math.min(timeout,stepLimit.getStore()??MAX_PICKUP_STEP_MS),stepDeadline.getStore()??Infinity);
   return stepDeadline.run(deadline,async()=>{
     do {
       try{const value=await fn();if(value&&Date.now()<=deadline)return value;}

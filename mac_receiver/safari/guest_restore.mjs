@@ -1,8 +1,11 @@
 // Manual readiness means selected Guest pickup + configured ZIP, not saved payment.
 import {runGuestDOM} from './guest_checkout.mjs';
 import {prepareGuestPaymentSession,validateSetupProfile} from './guest_setup.mjs';
-import {waitFor} from './shopping.mjs';
-export async function restoreGuestReady(window,url,config,{read=runGuestDOM,rebuild=prepareGuestPaymentSession,stage=()=>{}}={}){
+import {waitFor,withPreparationTimeout} from './shopping.mjs';
+export function restoreGuestReady(window,url,config,options={}){
+ return withPreparationTimeout(()=>restoreGuestReadyImpl(window,url,{...config,step_timeout_ms:20000},options));
+}
+async function restoreGuestReadyImpl(window,url,config,{read=runGuestDOM,rebuild=prepareGuestPaymentSession,stage=()=>{}}={}){
  const product=validateSetupProfile(window,url),zip=config.pickup_zip||'07094';
  let state=await read(window,'state'),navigationChanged=false;
  if(state.path==='/shop/checkout'&&['PickupContact','PickupContact-init','Billing','Billing-init','Review','Review-init'].includes(state.step)){

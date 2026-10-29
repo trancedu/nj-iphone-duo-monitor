@@ -33,3 +33,10 @@ test('shared production preparation accepts only exact profile and configured pr
  assert.throws(()=>validateSetupProfile({profile:'Duo1024Black'},url),/profile_product_mismatch/);
  assert.throws(()=>validateSetupProfile({profile:'Main'},url),/profile_not_allowed/);
 });
+
+test('unconfirmed native sign-in cancellation warns but does not stop Guest preparation',async()=>{
+ const {attemptPreparationSignInCancel}=await import('../safari/guest_setup.mjs');const stages=[];
+ const r=await attemptPreparationSignInCancel({},(name,detail)=>stages.push({name,detail}),{cancel:async()=>{throw Error('unknown_guest_sheet_requires_manual_review');}});
+ assert.equal(r.confirmed,false);assert.equal(stages[0].name,'setup_native_signin_cancel_unconfirmed');assert.equal(stages[0].detail.error_code,'unknown_guest_sheet_requires_manual_review');
+ await assert.rejects(()=>attemptPreparationSignInCancel({},()=>{},{cancel:async()=>{throw Error('native_cancel_requires_guest_signin');}}),/native_cancel_requires_guest_signin/);
+});

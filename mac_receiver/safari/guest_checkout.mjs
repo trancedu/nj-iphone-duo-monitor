@@ -323,23 +323,32 @@ end tell`;
 }
 export async function cancelGuestSignIn(window,stage=()=>{},options={}){
  const now=options.now||Date.now,pause=options.pause||(ms=>new Promise(r=>setTimeout(r,ms)));
- let needsWindowSelection=true;
- const probe=options.probe||(async cancel=>{
-  // Validate the bound Safari window and route before touching native UI.
+ // The stable smoke-tested path reads/presses the existing AX sheet directly.
+ // Only use the Window menu as a fallback if the bound window is not visible.
+ let needsWindowSelection=options.selectWindowFirst===true;
+ const nativeProbe=options.nativeProbe||(async({cancel,selectWindow})=>{
   const state=await runGuestDOM(window,'state');
   if(state.path!=='/shop/signIn'&&!(options.allowPickup&&state.path==='/shop/checkout'&&['Fulfillment','Fulfillment-init'].includes(state.step)))throw Error('native_cancel_requires_guest_signin');
+  return appleScript(guestAccountPromptScript(window.profile,{cancel,selectWindow}));
+ });
+ const probe=options.probe||(async cancel=>{
   const selectWindow=!cancel&&needsWindowSelection;
-  const status=await appleScript(guestAccountPromptScript(window.profile,{cancel,selectWindow}));
+  const status=await nativeProbe({cancel,selectWindow});
   if(selectWindow)needsWindowSelection=false;
-  if(cancel&&status==='cancelled')needsWindowSelection=true;
+  if(status==='target_window_not_visible')needsWindowSelection=true;
+  // After Cancel, verify the sheet directly; do not reopen a Window menu
+  // while macOS is removing the native sheet and restoring window focus.
+  if(cancel&&status==='cancelled')needsWindowSelection=false;
   return status;
  });
+ const timeout=Math.min(20000,Math.max(6000,options.timeoutMs||6000));
+ const visibilityGrace=timeout>6000?15000:4000;
  const started=now();let cancelled=false;
- while(now()-started<6000){
+ while(now()-started<timeout){
   const status=await probe(false);
   if(status==='unknown_sheet'||status==='target_window_not_visible'){
    // A new native sheet may precede its text/buttons. Wait without clicking.
-   if(now()-started>=(status==='target_window_not_visible'?4000:2000))throw Error(status==='target_window_not_visible'?'guest_target_window_not_visible':'unknown_guest_sheet_requires_manual_review');
+   if(now()-started>=(status==='target_window_not_visible'?visibilityGrace:timeout>6000?15000:2000))throw Error(status==='target_window_not_visible'?'guest_target_window_not_visible':'unknown_guest_sheet_requires_manual_review');
    await pause(200);continue;
   }
   if(status==='present'){

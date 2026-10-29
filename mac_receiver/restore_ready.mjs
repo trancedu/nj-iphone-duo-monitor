@@ -5,8 +5,22 @@ import {writeFileSync,mkdirSync,readFileSync} from 'node:fs';
 import {resolve,join} from 'node:path';
 import {homedir} from 'node:os';
 import {pathToFileURL} from 'node:url';
+import {listSafariWindows,SafariWindow} from './safari/shopping.mjs';
+import {runGuestDOM} from './safari/guest_checkout.mjs';
+import {expectedProduct} from './protocol.mjs';
 const titles={A:'256 白',B:'256 黑',C:'512 白',D:'512 黑',E:'1024 白（1TB）',F:'1024 黑（1TB）'};
 export function chooseLabels(selection){if(selection==='全部六个窗口'||selection==='all')return Object.keys(titles);if(Object.hasOwn(titles,selection))return [selection];const match=Object.entries(titles).find(([,title])=>title===selection);if(!match)throw Error('invalid_restore_selection');return [match[0]];}
+
+export async function verifyRestorePage(slot,zip,{list=listSafariWindows,Window=SafariWindow,read=runGuestDOM}={}){
+ const matches=(await list()).filter(w=>w.name.startsWith(slot.safari_profile+' — '));
+ if(matches.length!==1||matches[0].tabs!==1)throw Error('restore_profile_window_not_unique');
+ const w=new Window(matches[0].id,slot.safari_profile),page=await read(w,'state');
+ if(page.path!=='/shop/checkout'||!['Fulfillment','Fulfillment-init'].includes(page.step))throw Error('restore_final_page_not_pickup');
+ const state=await w.call('standbyState',{product:expectedProduct(slot.product_url)}),location=await w.call('locationState');
+ if(!state.pickup_selected||state.expired||state.session_warning||location.displayed_zip!==zip)throw Error('restore_final_pickup_not_verified');
+ return {window_id:w.id,step:page.step,pickup_selected:true,zip,expired:false,session_warning:false};
+}
+
 function choose(){const choices=['全部六个窗口',...Object.values(titles)],list=choices.map(JSON.stringify).join(',');const script=`set selected to choose from list {${list}} with title "恢复自提就绪" with prompt "选择恢复全部或一个配置（不会下单）" default items {"全部六个窗口"}\nif selected is false then return ""\nreturn item 1 of selected`;const r=spawnSync('/usr/bin/osascript',['-e',script],{encoding:'utf8'});if(r.status!==0)throw Error('selection_failed');return r.stdout.trim();}
 export async function main(){
  const args=process.argv.slice(2),root=resolve(homedir(),'Library/Application Support/iPhoneDuo/receiver-safari');
@@ -30,19 +44,24 @@ export async function main(){
    while(Date.now()-started<240000){
     item=await request('/status/'+response.event_id);
     const stage=Object.keys(item.timestamps||{}).at(-1);
-    if(stage!==lastStage){lastStage=stage;const message={manual_retry_requested:'后台正在检查，请保留窗口。',manual_restore_session_rebuild_started_at:'会话需要重新准备，可能需要约一分钟。',setup_checkout_clicked_at:'正在进入 Guest Checkout…',apple_account_cancel_clicked:'已取消 Apple Account 登录提示。',setup_shipping_verified_at:'地址准备完成，正在准备付款资料…',setup_payment_review_verified_at:'付款预填完成，正在切回自提…'}[stage];if(message)console.log('  '+message);}
+    if(stage!==lastStage){lastStage=stage;const message={manual_retry_requested:'后台正在检查，请保留窗口。',manual_restore_waiting_for_maintenance_at:'正在等待此窗口已有的后台维护结束，不会同时操作。',manual_restore_session_rebuild_started_at:'会话需要重新准备，可能需要约一分钟。',setup_checkout_clicked_at:'正在进入 Guest Checkout…',apple_account_cancel_clicked:'已取消 Apple Account 登录提示。',setup_shipping_verified_at:'地址准备完成，正在准备付款资料…',setup_payment_review_verified_at:'付款预填完成，正在切回自提…'}[stage];if(message)console.log('  '+message);}
     if(item.status==='manual_retry_ready')break;
     if(['manual_review','manual_retry_cancelled','automation_paused'].includes(item.status))throw Error(item.reason||'restore_failed');
     await new Promise(r=>setTimeout(r,1000));
    }
    if(item?.status!=='manual_retry_ready'){console.log('  后台仍在恢复；本次停止等待，不会重复启动。');results.push({label,status:'still_running',event_id:response.event_id});continue;}
+   const slot=config.slots.find(s=>s.label===label);
+   const verified=await verifyRestorePage(slot,config.pickup_zip||'07094');
    const mode=item.restore_result?.mode;
+   const nativeVerified=item.restore_result?.native_prompt_verified;
+   if(nativeVerified===false)console.log('  自提页已核对；原生登录弹窗取消尚未确认，已记录警告。');
    console.log('  '+(mode==='already_ready'?'已就绪，页面未改动，旧锁已清理。':mode==='session_rebuilt'?'完整会话准备完成，已回到自提／07094。':'已恢复到自提／07094。'));
-   results.push({label,status:'ready',mode,event_id:response.event_id});
+   results.push({label,status:'ready',mode,event_id:response.event_id,verified,native_prompt_verified:nativeVerified});
   }catch(error){const reason=/^[a-z_]+$/.test(error.message)?error.message:'restore_failed';console.log('  恢复未完成：'+reason+'。');results.push({label,status:'failed',reason});}
  }
  const dir=resolve(root,config.state_dir||'runtime-router','restore-reports');mkdirSync(dir,{recursive:true,mode:0o700});
  const file=join(dir,Date.now()+'.json');writeFileSync(file,JSON.stringify({at:new Date().toISOString(),results},null,2),{mode:0o600});
+ if(results.some(r=>r.status!=='ready'))process.exitCode=1;
  console.log('\n完成：'+results.filter(r=>r.status==='ready').length+'/'+labels.length+' 个窗口就绪。\n不会执行购买或最终下单。\n记录：'+file);
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href)main().catch(error=>{console.error('恢复脚本未完成：'+(/^[a-z_]+$/.test(error.message)?error.message:'unexpected_error'));process.exitCode=1;});

@@ -3,14 +3,14 @@ import {SafariWindow,listSafariWindows,prepareSafari,prepareSafariStandby,waitFo
 import {runGuestSignal,prepareGuestStandby,runGuestDOM} from './guest_checkout.mjs';
 import {captureFailureEvidence} from './failure_evidence.mjs';
 import {restoreGuestReady} from './guest_restore.mjs';
-import {prepareGuestPaymentSession} from './guest_setup.mjs';
+import {prepareGuestPaymentSession,attemptPreparationSignInCancel} from './guest_setup.mjs';
 import {signalSafari} from './feedback.mjs';
 import {appendDiagnostic,safeErrorCode} from './diagnostics.mjs';
 import {join} from 'node:path';
 import {Stop,expectedProduct} from '../protocol.mjs';
 export class SafariPickupBrowser {
-  constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,standby=prepareSafariStandby,signal=signalSafari,guestState=runGuestDOM}={}) {
-    this.guestStateReader=guestState;this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=config.checkout_method==='guest_credit'?async(w,u,c,opts)=>{const r=await runGuestSignal(w,u,c,c.guest_billing,opts.stage,{mode:c.guest_auto_place_order&&!c.simulation_no_payment?'production':'test',max_total_usd:c.guest_max_total_usd||0,shouldYieldToRecent:opts.shouldYieldToRecent,mayForeground:opts.mayForeground});return {...r,status:r.status==='review_ready_test_stopped'||r.status==='order_requested'||r.status==='order_request_uncertain'?'awaiting_user':r.status};}:prepare;this.standby=config.checkout_method==='guest_credit'?prepareGuestStandby:standby;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
+  constructor(config,{listWindows=listSafariWindows,Window=SafariWindow,prepare=prepareSafari,standby=prepareSafariStandby,signal=signalSafari,guestState=runGuestDOM,guestSetup=prepareGuestPaymentSession}={}) {
+    this.guestStateReader=guestState;this.guestSetup=guestSetup;this.config=config;this.listWindows=listWindows;this.Window=Window;this.workflow=config.checkout_method==='guest_credit'?async(w,u,c,opts)=>{const r=await runGuestSignal(w,u,c,c.guest_billing,opts.stage,{mode:c.guest_auto_place_order&&!c.simulation_no_payment?'production':'test',max_total_usd:c.guest_max_total_usd||0,shouldYieldToRecent:opts.shouldYieldToRecent,mayForeground:opts.mayForeground});return {...r,status:r.status==='review_ready_test_stopped'||r.status==='order_requested'||r.status==='order_request_uncertain'?'awaiting_user':r.status};}:prepare;this.standby=config.checkout_method==='guest_credit'?prepareGuestStandby:standby;this.signal=signal;this.connected=false;this.page=null;this.requestReservations=0;this.idleRefreshPromise=null;this.lastIdleRefreshAt=Date.now();
   }
   ready(){return this.connected&&!!this.page&&!this.page.closed;}
   async start(){await this.ensurePage();}
@@ -80,6 +80,8 @@ export class SafariPickupBrowser {
     this.lastStandbyReady=false;await this.ensurePage();
     if(this.config.checkout_method==='guest_credit'){
       const result=await restoreGuestReady(this.window,item.product_url,this.config,{stage});
+      const native=await attemptPreparationSignInCancel(this.window,stage,{allowPickup:true});
+      result.native_prompt_verified=native.confirmed;
       this.stalledProfilePending=false;this.lastStandbyReady=true;this.lastStandbyCheckAt=Date.now();this.lastIdleRefreshAt=Date.now();return result;
     }
     const product=expectedProduct(item.product_url),state=await this.window.call('standbyState',{product});
@@ -252,10 +254,24 @@ export class SafariPickupBrowser {
     const checkDue=now-(this.lastStandbyCheckAt??this.lastIdleRefreshAt)>=checkSeconds*1000;
     if(this.config.standby_page!=='pickup_checkout'||!this.ready()||this.requestReservations||this.idleRefreshPromise||(!refreshDue&&!checkDue))return null;
     this.lastStandbyCheckAt=now;
-    if(refreshDue)this.lastIdleRefreshAt=now;
     const task=(async()=>{
       try{
-        if(this.config.checkout_method==='guest_credit'){const guest=await runGuestDOM(this.window,'state');if(guest.path==='/shop/checkout'&&['PickupContact','PickupContact-init','Billing','Billing-init','Review','Review-init'].includes(guest.step)){this.lastSessionCheck={at:new Date(now).toISOString(),status:'protected'};this.lastStandbyReady=false;return {status:'protected'};}}
+        if(this.config.checkout_method==='guest_credit'){
+          const guest=await this.guestStateReader(this.window,'state');
+          if(guest.path==='/shop/checkout'&&['PickupContact','PickupContact-init','Billing','Billing-init','Review','Review-init'].includes(guest.step)){this.lastSessionCheck={at:new Date(now).toISOString(),status:'protected'};this.lastStandbyReady=false;return {status:'protected'};}
+          // A redirect to sign-in/Bag is a lost Guest session, not an account
+          // login request. Recover before the generic DOM rejects the heading.
+          if(this.config.guest_auto_rearm&&['/shop/signIn','/shop/bag'].includes(guest.path)){
+            this.lastStandbyReady=false;this.sessionRecoveryPending=true;
+            this.lastSessionCheck={at:new Date(now).toISOString(),status:'session_redirect',reason:guest.path==='/shop/signIn'?'guest_signin_redirect':'guest_bag_redirect'};
+            if(now<(this.nextSessionRecoveryAt||0))return {status:'backoff'};
+            this.nextSessionRecoveryAt=now+180000;
+            const result=await this.guestSetup(this.window,this.config.preseeded_product_url,this.config,{stage:this.standbyTrace().stage});
+            if(result.status!=='standby_checkout')throw new Stop('standby_checkout_not_verified');
+            this.lastIdleRefreshAt=now;this.nextSessionRecoveryAt=0;this.sessionRecoveryPending=false;this.stalledProfilePending=false;this.lastStandbyReady=true;
+            this.lastSessionCheck.status='recovered';return result;
+          }
+        }
         // A selected store, details page or payment sheet is never maintained.
         const product=expectedProduct(this.config.preseeded_product_url);
         let state=await this.window.call('standbyState',{product});
@@ -299,7 +315,9 @@ export class SafariPickupBrowser {
             console.info(JSON.stringify({event:'checkout_session_warning_recovery',profile:this.config.safari_profile,status:'recovered',at:new Date().toISOString()}));
             return result;
           }
-          this.lastSessionCheck.status='session_continued';this.lastIdleRefreshAt=now;
+          this.lastSessionCheck.status='session_continued';this.lastSessionContinuedAt=now;
+          // Dismissing a warning is not an actual page refresh. Keep its
+          // separate timestamp so frequent prompts cannot defer maintenance.
           console.info(JSON.stringify({event:'checkout_session_continued',profile:this.config.safari_profile,at:new Date().toISOString()}));
           return {status:'session_continued'};
         }

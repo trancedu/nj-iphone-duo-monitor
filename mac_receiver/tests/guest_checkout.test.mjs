@@ -249,3 +249,25 @@ test('unknown order retirement requires explicit production intent, preserves ou
  assert.equal(await f.page.evaluate(()=>window.orders),1);
  await assert.rejects(()=>f.page.evaluate(guestCheckoutDOM,{...args,mode:'production',event_id:'other'}),/submission_not_found/);
 });
+
+test('session preparation tolerates slow native window return after cancelling sign-in',async()=>{
+ const {cancelGuestSignIn}=await import('../safari/guest_checkout.mjs');let clock=0,closed=false;
+ const result=await cancelGuestSignIn({},()=>{},{timeoutMs:20000,now:()=>clock,pause:async ms=>clock+=ms,probe:async cancel=>{if(cancel){closed=true;return 'cancelled';}return !closed?'present':clock<8000?'target_window_not_visible':'absent';}});
+ assert.equal(result.status,'cancelled_and_closed');assert.equal(clock,8000);
+});
+test('preparation waits for slow native sheet contents before identifying and cancelling',async()=>{
+ const {cancelGuestSignIn}=await import('../safari/guest_checkout.mjs');let clock=0,closed=false;
+ const result=await cancelGuestSignIn({},()=>{},{timeoutMs:20000,now:()=>clock,pause:async ms=>clock+=ms,probe:async cancel=>{if(cancel){closed=true;return 'cancelled';}return closed?'absent':clock<8000?'unknown_sheet':'present';}});
+ assert.equal(result.status,'cancelled_and_closed');assert.equal(clock,8200);
+});
+
+test('native cancellation uses direct AX detection, press and verification without Window-menu switching',async()=>{
+ const {cancelGuestSignIn}=await import('../safari/guest_checkout.mjs');let clock=0;const calls=[],answers=['present','cancelled','absent'];
+ const r=await cancelGuestSignIn({},()=>{},{now:()=>clock,pause:async ms=>clock+=ms,nativeProbe:async opts=>{calls.push(opts);return answers.shift();}});
+ assert.equal(r.status,'cancelled_and_closed');assert.deepEqual(calls,[{cancel:false,selectWindow:false},{cancel:true,selectWindow:false},{cancel:false,selectWindow:false}]);
+});
+test('Window-menu selection is only a fallback for an inaccessible target and is not repeated after Cancel',async()=>{
+ const {cancelGuestSignIn}=await import('../safari/guest_checkout.mjs');let clock=0;const calls=[],answers=['target_window_not_visible','present','cancelled','absent'];
+ const r=await cancelGuestSignIn({},()=>{},{now:()=>clock,pause:async ms=>clock+=ms,nativeProbe:async opts=>{calls.push(opts);return answers.shift();}});
+ assert.equal(r.status,'cancelled_and_closed');assert.deepEqual(calls.map(x=>x.selectWindow),[false,true,false,false]);
+});

@@ -321,6 +321,12 @@ export class ProfileRouter {
     setImmediate(async()=>{
       let claimed=false;
       try{
+        // Reserve the slot first; finish an already-running maintenance task
+        // before any restore DOM/navigation. A new restore must never race it.
+        if(slot.browser.idleRefreshPromise){
+          e.stage(item,'manual_restore_waiting_for_maintenance_at');
+          await slot.browser.idleRefreshPromise.catch(()=>{});
+        }
         // Wait for the old runner/recovery to unwind; never run two scripts on
         // one profile or terminate a different configuration's browser work.
         await waitFor(()=>!e.releasing&&!e.signaling&&!['queued','running'].includes(e.state.events[oldId]?.status),12000,100);
